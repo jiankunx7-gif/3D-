@@ -161,3 +161,7 @@ button, input { font: inherit; }
   .control-panel { display: block; padding: 22px 18px 28px; }.control-panel .panel-title { margin-bottom: 24px; }.controls { grid-template-columns: 1fr; }.scale-control { border-top: 1px solid var(--line); padding-top: 22px; }.size-summary { margin-top: 26px; }.control-panel .editor-section { margin-top: 24px; }
 }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+@media (max-width: 720px) {
+  .shape-list { grid-template-columns: repeat(3, 1fr); }
+  .shape-button > span:nth-child(2) { display: inline; font-size: 10px; }
+}

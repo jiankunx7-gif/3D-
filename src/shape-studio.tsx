@@ -1,16 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Camera, Copy, Cylinder, DoorOpen, Download, Grid3X3, LocateFixed, Maximize2, Minus, MousePointer2, Move3D, Plus, Redo2, Rotate3D } from "lucide-react";
+import { Box, Camera, Copy, Cylinder, DoorOpen, Download, Grid3X3, LocateFixed, Maximize2, Minus, MousePointer2, Move3D, Plus, Redo2, Rotate3D, Shirt } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
+import { garmentFaces } from './garment-model';
 
-type ShapeType = "box" | "cylinder";
+type ShapeType = "box" | "cylinder" | "garment";
 type Dimensions = { width: number; height: number; depth: number; scale: number };
 type Vec3 = [number, number, number];
 type ShapeWorkspace = { dimensions: Dimensions; positions: Vec3[]; lidAngles: number[]; selectedIndex: number };
 type Mesh = { vertices: Vec3[]; faces: number[][] };
-type SceneFace = { points: Vec3[]; material: "body" | "lid" | "inside" };
+type SceneFace = { points: Vec3[]; material: "body" | "lid" | "inside" | "trim" };
 type InstanceFace = SceneFace & { instanceIndex: number };
 type HitRegion = { index: number; x: number; y: number; radius: number };
 const GROUND_Y = -0.64;
@@ -21,6 +22,7 @@ const CANVAS_EDGE_PADDING = 12;
 const SHAPES = [
   { id: "box" as const, label: "长方体", icon: Box },
   { id: "cylinder" as const, label: "圆柱体", icon: Cylinder },
+  { id: "garment" as const, label: "礼服套", icon: Shirt },
 ];
 
 function boxMesh(): Mesh {
@@ -63,6 +65,7 @@ function hingeRotate([x, y, z]: Vec3, hingeY: number, hingeZ: number, angle: num
 }
 
 function sceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle: number): SceneFace[] {
+  if (shape === 'garment') return garmentFaces(dimensions);
   const width = dimensions.width * dimensions.scale;
   const height = dimensions.height * dimensions.scale;
   const depth = dimensions.depth * dimensions.scale;
@@ -92,7 +95,7 @@ function sceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle: number):
     const lidVertices: Vec3[] = [
       [-width/2, hingeY, -depth/2], [width/2, hingeY, -depth/2], [width/2, hingeY, depth/2], [-width/2, hingeY, depth/2],
       [-width/2, hingeY + thickness, -depth/2], [width/2, hingeY + thickness, -depth/2], [width/2, hingeY + thickness, depth/2], [-width/2, hingeY + thickness, depth/2],
-    ].map((point) => hingeRotate(point, hingeY, hingeZ, angle));
+    ].map((point) => hingeRotate(point as Vec3, hingeY, hingeZ, angle));
     [[0,3,2,1], [4,5,6,7], [0,1,5,4], [3,7,6,2], [0,4,7,3], [1,2,6,5]].forEach((face) => {
       faces.push({ material: "lid", points: face.map((index) => lidVertices[index]) });
     });
@@ -116,7 +119,7 @@ function sceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle: number):
 }
 
 function positionedSceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngles: number[], positions: Vec3[]): InstanceFace[] {
-  const fit = Math.max(dimensions.width * dimensions.scale, dimensions.height * dimensions.scale, dimensions.depth * dimensions.scale, .1);
+  const fit = shape === 'garment' ? 1 : Math.max(dimensions.width * dimensions.scale, dimensions.height * dimensions.scale, dimensions.depth * dimensions.scale, .1);
   return positions.flatMap(([offsetX, offsetY, offsetZ], instanceIndex) =>
     sceneFaces(shape, dimensions, lidAngles[instanceIndex] ?? 0).map(({ points, material }) => ({
       material,
@@ -127,7 +130,7 @@ function positionedSceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle
 }
 
 function groundOffsetFor(shape: ShapeType, dimensions: Dimensions, lidAngle: number) {
-  const fit = Math.max(dimensions.width * dimensions.scale, dimensions.height * dimensions.scale, dimensions.depth * dimensions.scale, .1);
+  const fit = shape === 'garment' ? 1 : Math.max(dimensions.width * dimensions.scale, dimensions.height * dimensions.scale, dimensions.depth * dimensions.scale, .1);
   const lowestPoint = Math.min(...sceneFaces(shape, dimensions, lidAngle).flatMap((face) => face.points.map((point) => point[1]))) / fit;
   return GROUND_Y - lowestPoint;
 }
@@ -166,15 +169,15 @@ function calculateZoomLimit(shape: ShapeType, dimensions: Dimensions, rotation: 
       return x >= CANVAS_EDGE_PADDING && x <= width - CANVAS_EDGE_PADDING && y >= CANVAS_EDGE_PADDING && y <= height - CANVAS_EDGE_PADDING;
     });
   };
-  if (!fits(MIN_ZOOM)) return MIN_ZOOM;
-  let low = MIN_ZOOM;
+  if (!fits(.03)) return .03;
+  let low = .03;
   let high = MAX_ZOOM_SEARCH;
   for (let index = 0; index < 26; index++) {
     const middle = (low + high) / 2;
     if (fits(middle)) low = middle;
     else high = middle;
   }
-  return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM_SEARCH, low));
+  return Math.max(.03, Math.min(MAX_ZOOM_SEARCH, low));
 }
 
 function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, shape: ShapeType, dimensions: Dimensions, rotation: { yaw: number; pitch: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, lidAngles: number[], positions: Vec3[], selectedIndex: number) {
@@ -251,7 +254,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
         ctx.beginPath();
         projected.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
         ctx.closePath();
-        ctx.fillStyle = material === "inside" ? "hsl(216 20% 20%)" : material === "lid" ? `hsl(20 92% ${49 + shade * 24}%)` : `hsl(18 88% ${42 + shade * 24}%)`;
+        ctx.fillStyle = material === "trim" ? `hsl(215 12% ${55 + shade * 28}%)` : material === "inside" ? "hsl(216 20% 20%)" : material === "lid" ? `hsl(20 92% ${49 + shade * 24}%)` : `hsl(18 88% ${42 + shade * 24}%)`;
         ctx.fill();
         ctx.strokeStyle = material === "inside" ? "rgba(255,255,255,.08)" : material === "lid" ? "rgba(90,34,12,.38)" : "rgba(68,28,12,.22)";
         ctx.lineWidth = material === "lid" ? 1 : .75;
@@ -297,9 +300,10 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
 }
 
 function DimensionControl({ label, axis, value, unit, onChange }: { label: string; axis: string; value: number; unit: string; onChange: (value: number) => void }) {
+  const min = unit === "%" ? 10 : .5, max = unit === "%" ? 500 : 10, step = unit === "%" ? 1 : .1;
   return <div className="dimension-control">
-    <div className="control-heading"><span><b className={`axis axis-${axis.toLowerCase()}`}>{axis}</b>{label}</span><label className="value-field"><input aria-label={`${label}数值`} type="number" min="0.5" max="10" step="0.1" value={value} onChange={(e) => onChange(Math.min(10, Math.max(.5, Number(e.target.value) || .5)))} /><span>{unit}</span></label></div>
-    <Slider aria-label={label} min={0.5} max={10} step={0.1} value={[value]} onValueChange={([next]) => onChange(next)} />
+    <div className="control-heading"><span><b className={`axis axis-${axis.toLowerCase()}`}>{axis}</b>{label}</span><label className="value-field"><input aria-label={`${label}数值`} type="number" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Math.min(max, Math.max(min, Number(e.target.value) || min)))} /><span>{unit}</span></label></div>
+    <Slider aria-label={label} min={min} max={max} step={step} value={[value]} onValueChange={([next]) => onChange(next)} />
   </div>;
 }
 
@@ -309,8 +313,10 @@ export default function ShapeStudio() {
   const drawSceneRef = useRef<((cleanCapture?: boolean) => void) | null>(null);
   const pointerRef = useRef<{ id: number; x: number; y: number; action: "object" | "camera"; objectIndex: number } | null>(null);
   const lidAnimationRef = useRef<number | null>(null);
-  const [shape, setShape] = useState<ShapeType>("box");
+  const [shape, setShape] = useState<ShapeType>("garment");
+  const isGarment = shape === "garment";
   const [workspaces, setWorkspaces] = useState<Record<ShapeType, ShapeWorkspace>>({
+    garment: { dimensions: { width: 1, height: 1, depth: 1, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], selectedIndex: 0 },
     box: { dimensions: { width: 4, height: 3, depth: 2.5, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], selectedIndex: 0 },
     cylinder: { dimensions: { width: 3, height: 4, depth: 3, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], selectedIndex: 0 },
   });
@@ -323,6 +329,7 @@ export default function ShapeStudio() {
   const [captureStatus, setCaptureStatus] = useState(false);
   const { dimensions, positions, lidAngles, selectedIndex } = workspaces[shape];
   const quantity = positions.length;
+  const dimensionLabel = (value: number) => isGarment ? `${Math.round(value * 100)}%` : `${value.toFixed(1)} cm`;
   const selectedLidAngle = lidAngles[selectedIndex] ?? 0;
   const groundMinY = groundOffsetFor(shape, dimensions, selectedLidAngle);
   useCanvasRenderer(canvasRef, hitRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, positions, selectedIndex);
@@ -355,6 +362,7 @@ export default function ShapeStudio() {
   const toggleGround = () => {
     if (groundEnabled) { setGroundEnabled(false); return; }
     setWorkspaces((current) => ({
+      garment: { ...current.garment, positions: current.garment.positions.map(([x,,z]) => [x, groundOffsetFor("garment", current.garment.dimensions, 0), z] as Vec3) },
       box: { ...current.box, positions: current.box.positions.map(([x,,z], index) => [x, groundOffsetFor("box", current.box.dimensions, current.box.lidAngles[index] ?? 0), z] as Vec3) },
       cylinder: { ...current.cylinder, positions: current.cylinder.positions.map(([x,,z], index) => [x, groundOffsetFor("cylinder", current.cylinder.dimensions, current.cylinder.lidAngles[index] ?? 0), z] as Vec3) },
     }));
@@ -430,7 +438,7 @@ export default function ShapeStudio() {
   return <main className="studio-shell">
     <header className="topbar"><div className="brand"><span className="brand-mark"><Box size={19} strokeWidth={2.2} /></span><div><strong>FORM<span>3D</span></strong><small>形体工作台</small></div></div><div className="topbar-status"><span className="status-dot" />实时预览</div></header>
     <div className="workspace">
-      <aside className="shape-panel" aria-label="图形选择"><div className="panel-title"><span>01</span><div><strong>选择图形</strong><small>两套独立工作区</small></div></div><div className="shape-list">
+      <aside className="shape-panel" aria-label="图形选择"><div className="panel-title"><span>01</span><div><strong>选择图形</strong><small>各模型独立工作区</small></div></div><div className="shape-list">
         {SHAPES.map((item) => { const Icon = item.icon; return <Button key={item.id} variant="ghost" className={`shape-button ${shape === item.id ? "is-active" : ""}`} onClick={() => setShape(item.id)} aria-pressed={shape === item.id}><span className="shape-icon"><Icon size={25} strokeWidth={1.55} /></span><span>{item.label}</span><i /></Button>; })}
       </div><div className="interaction-tip"><MousePointer2 size={18} /><p><strong>点中图形后拖动摆放</strong><span>拖动空白旋转 · 滚轮缩放</span></p></div></aside>
       <section className="viewport-panel" aria-label="3D 预览区">
@@ -439,17 +447,17 @@ export default function ShapeStudio() {
           onPointerDown={(e) => { const rect=e.currentTarget.getBoundingClientRect(); const x=e.clientX-rect.left,y=e.clientY-rect.top; const hit=[...hitRegionsRef.current].sort((a,b)=>a.radius-b.radius).find((region)=>Math.hypot(x-region.x,y-region.y)<=region.radius+10); e.currentTarget.setPointerCapture(e.pointerId); if(hit)selectInstance(hit.index); pointerRef.current = { id:e.pointerId, x:e.clientX, y:e.clientY, action:hit?"object":"camera", objectIndex:hit?.index ?? -1 }; e.currentTarget.classList.add(hit?"is-moving-object":"is-dragging"); }}
           onPointerMove={(e) => { const p=pointerRef.current; if(!p||p.id!==e.pointerId)return; const dx=e.clientX-p.x,dy=e.clientY-p.y; if(p.action==="camera")setRotation((r)=>({yaw:r.yaw+dx*.009,pitch:Math.max(-1.48,Math.min(1.48,r.pitch+dy*.009))})); else { const canvas=e.currentTarget; const factor=2.45/(Math.max(220,Math.min(canvas.clientWidth,canvas.clientHeight))*zoom); const [wx,wy,wz]=inverseRotate([dx*factor,-dy*factor,0],rotation.yaw,rotation.pitch); updateWorkspace(shape,(workspace)=>({ ...workspace, positions:workspace.positions.map((position,index)=>index===p.objectIndex?[position[0]+wx,groundEnabled?Math.max(position[1]+wy,groundOffsetFor(shape,workspace.dimensions,workspace.lidAngles[index] ?? 0)):position[1]+wy,position[2]+wz] as Vec3:position) })); } pointerRef.current={...p,x:e.clientX,y:e.clientY}; }}
           onPointerUp={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object"); }} onPointerCancel={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object"); }} onDoubleClick={resetView}
-          onWheel={(e) => { e.preventDefault(); setZoom((z)=>Math.max(MIN_ZOOM,Math.min(zoomLimit,z-e.deltaY*.0015))); }}
+          onWheel={(e) => { e.preventDefault(); setZoom((z)=>Math.max(Math.min(MIN_ZOOM,zoomLimit * .5),Math.min(zoomLimit,z-e.deltaY*.0015))); }}
           onKeyDown={(e) => { if(e.key==="ArrowLeft")setRotation((r)=>({...r,yaw:r.yaw-.08})); if(e.key==="ArrowRight")setRotation((r)=>({...r,yaw:r.yaw+.08})); if(e.key==="ArrowUp")setRotation((r)=>({...r,pitch:Math.max(-1.48,r.pitch-.08)})); if(e.key==="ArrowDown")setRotation((r)=>({...r,pitch:Math.min(1.48,r.pitch+.08)})); if(e.key==="0")resetView(); }} />
-          <div className="canvas-ratio-label">1:1 极限画布</div><div className="dimension-badge badge-width"><span>W</span>{dimensions.width.toFixed(1)} cm</div><div className="dimension-badge badge-height"><span>H</span>{dimensions.height.toFixed(1)} cm</div><div className="dimension-badge badge-depth"><span>D</span>{dimensions.depth.toFixed(1)} cm</div><div className="camera-readout"><Camera size={14}/><span>{focalLength}mm · {fieldOfView}°</span></div><div className="zoom-readout"><Rotate3D size={15} /><span>{Math.round(zoom*100)}% / 极限 {Math.round(zoomLimit*100)}%</span></div><div className="capture-confirmation"><Camera size={16}/>JPG 已保存</div>
+          <div className="canvas-ratio-label">1:1 极限画布</div><div className="dimension-badge badge-width"><span>W</span>{dimensionLabel(dimensions.width)}</div><div className="dimension-badge badge-height"><span>H</span>{dimensionLabel(dimensions.height)}</div><div className="dimension-badge badge-depth"><span>D</span>{dimensionLabel(dimensions.depth)}</div><div className="camera-readout"><Camera size={14}/><span>{focalLength}mm · {fieldOfView}°</span></div><div className="zoom-readout"><Rotate3D size={15} /><span>{Math.round(zoom*100)}% / 极限 {Math.round(zoomLimit*100)}%</span></div><div className="capture-confirmation"><Camera size={16}/>JPG 已保存</div>
           {groundEnabled && <div className="ground-status"><span className="status-dot"/>固定地面 · 防穿透</div>}
         </div>
         <div className="view-presets" aria-label="视角预设"><span>快速视角</span><Button variant="outline" size="sm" onClick={()=>setView("front")}>正面</Button><Button variant="outline" size="sm" onClick={()=>setView("top")}>顶面</Button><Button variant="outline" size="sm" onClick={()=>setView("iso")}>等轴</Button></div>
       </section>
       <aside className="control-panel" aria-label="模型与摄像机控制"><div className="panel-title"><span>02</span><div><strong>调整尺寸</strong><small>实时改变比例</small></div></div><div className="controls">
-        <DimensionControl label="长度" axis="W" value={dimensions.width} unit="cm" onChange={(v)=>changeDimension("width",v)} /><DimensionControl label="高度" axis="H" value={dimensions.height} unit="cm" onChange={(v)=>changeDimension("height",v)} /><DimensionControl label="深度" axis="D" value={dimensions.depth} unit="cm" onChange={(v)=>changeDimension("depth",v)} />
+        {isGarment ? <><DimensionControl label="宽度" axis="W" value={Math.round(dimensions.width * 100)} unit="%" onChange={(v)=>changeDimension("width",v / 100)} /><DimensionControl label="高度" axis="H" value={Math.round(dimensions.height * 100)} unit="%" onChange={(v)=>changeDimension("height",v / 100)} /><DimensionControl label="厚度" axis="D" value={Math.round(dimensions.depth * 100)} unit="%" onChange={(v)=>changeDimension("depth",v / 100)} /></> : <><DimensionControl label="长度" axis="W" value={dimensions.width} unit="cm" onChange={(v)=>changeDimension("width",v)} /><DimensionControl label="高度" axis="H" value={dimensions.height} unit="cm" onChange={(v)=>changeDimension("height",v)} /><DimensionControl label="深度" axis="D" value={dimensions.depth} unit="cm" onChange={(v)=>changeDimension("depth",v)} /></>}
         <div className="scale-control"><div className="control-heading"><span><Maximize2 size={16}/>整体大小</span><output>{dimensions.scale.toFixed(1)}×</output></div><Slider aria-label="整体大小" min={.5} max={2} step={.1} value={[dimensions.scale]} onValueChange={([next])=>changeDimension("scale",next)} /><div className="slider-ends"><span>0.5×</span><span>2.0×</span></div></div>
-      </div><div className="size-summary"><span>当前尺寸</span><strong>{dimensions.width.toFixed(1)} × {dimensions.height.toFixed(1)} × {dimensions.depth.toFixed(1)}</strong><small>单位：厘米 · 比例 {dimensions.scale.toFixed(1)}×</small></div>
+      </div><div className="size-summary"><span>{isGarment ? "宽 × 高 × 厚 · 相对比例" : "当前尺寸"}</span><strong>{dimensionLabel(dimensions.width)} × {dimensionLabel(dimensions.height)} × {dimensionLabel(dimensions.depth)}</strong><small>{isGarment ? "简化礼服套 · 无固定尺寸 · 100% 为初始比例" : `单位：厘米 · 比例 ${dimensions.scale.toFixed(1)}×`}</small>{isGarment && <Button variant="secondary" size="sm" onClick={()=>updateWorkspace("garment", (workspace)=>({...workspace, dimensions:{width:1,height:1,depth:1,scale:1}, positions:workspace.positions.map(([x,y,z])=>[x, groundEnabled ? Math.max(y, -.04) : y,z] as Vec3)}))}>恢复初始比例</Button>}</div>
         <section className="editor-section instance-section" aria-label="数量与自由摆放">
           <div className="section-heading"><span><Copy size={16}/>数量与自由摆放</span><output>{quantity} 个</output></div>
           <div className="quantity-stepper"><Button variant="outline" size="icon" aria-label="减少数量" disabled={quantity<=1} onClick={()=>changeQuantity(quantity-1)}><Minus size={14}/></Button><strong>{quantity}</strong><Button variant="outline" size="icon" aria-label="增加数量" disabled={quantity>=12} onClick={()=>changeQuantity(quantity+1)}><Plus size={14}/></Button></div>
@@ -458,7 +466,7 @@ export default function ShapeStudio() {
           <div className="instance-picker" aria-label="选择要编辑的形体">{positions.map((_,index)=><Button key={index} size="sm" variant={selectedIndex===index?"default":"outline"} onClick={()=>selectInstance(index)} aria-pressed={selectedIndex===index}>{index+1}</Button>)}</div>
           <div className="position-editor">
             <div className="section-heading"><span><LocateFixed size={15}/>形体 {selectedIndex+1} 坐标</span><Button variant="ghost" size="sm" onClick={resetSelectedPosition}>归零</Button></div>
-            {([0,1,2] as const).map((axis)=>{ const labels=["X 左右","Y 上下","Z 前后"]; const axisNames=["X","Y","Z"]; const minimum=axis===1&&groundEnabled?groundMinY:-2.5; return <div className="position-row" key={axis}><label><b>{axisNames[axis]}</b>{labels[axis]}</label><Slider aria-label={`${labels[axis]}位置`} min={minimum} max={2.5} step={.01} value={[positions[selectedIndex]?.[axis] ?? 0]} onValueChange={([next])=>changePosition(axis,next)} /><input aria-label={`${labels[axis]}坐标值`} type="number" min={minimum} max="2.5" step="0.01" value={(positions[selectedIndex]?.[axis] ?? 0).toFixed(2)} onChange={(e)=>changePosition(axis,Math.max(minimum,Math.min(2.5,Number(e.target.value)||0)))} /></div>; })}
+            {([0,1,2] as const).map((axis)=>{ const labels=["X 左右","Y 上下","Z 前后"]; const axisNames=["X","Y","Z"]; const minimum=axis===1&&groundEnabled?groundMinY:-2.5; const maximum=Math.max(2.5, minimum+2.5); return <div className="position-row" key={axis}><label><b>{axisNames[axis]}</b>{labels[axis]}</label><Slider aria-label={`${labels[axis]}位置`} min={minimum} max={maximum} step={.01} value={[positions[selectedIndex]?.[axis] ?? 0]} onValueChange={([next])=>changePosition(axis,next)} /><input aria-label={`${labels[axis]}坐标值`} type="number" min={minimum} max={maximum} step="0.01" value={(positions[selectedIndex]?.[axis] ?? 0).toFixed(2)} onChange={(e)=>changePosition(axis,Math.max(minimum,Math.min(maximum,Number(e.target.value)||0)))} /></div>; })}
           </div>
         </section>
         <section className="editor-section camera-section" aria-label="透视摄像机">
@@ -467,13 +475,13 @@ export default function ShapeStudio() {
           <Slider aria-label="摄像机焦距" min={18} max={135} step={1} value={[focalLength]} onValueChange={([next])=>setFocalLength(next)} />
           <div className="camera-meta"><span>18mm 广角</span><b>视场角 {fieldOfView}°</b><span>135mm 长焦</span></div>
         </section>
-        <section className="editor-section lid-section" aria-label="顶部盖面编辑">
+        {!isGarment && <section className="editor-section lid-section" aria-label="顶部盖面编辑">
           <div className="section-heading"><span><DoorOpen size={17}/>形体 {selectedIndex+1} 顶部盖面</span><output>{Math.round(selectedLidAngle)}°</output></div>
           <p>只控制当前选中的形体；{shape === "box" ? "沿长方体后边缘铰链翻动" : "沿圆柱体后侧铰链翻动"}。</p>
           <Slider aria-label={`形体 ${selectedIndex+1} 盖面开启角度`} min={0} max={200} step={1} value={[selectedLidAngle]} onValueChange={([next])=>changeSelectedLid(next)} />
           <div className="lid-angle-range"><span>0° 关闭</span><span>200° 翻至背后</span></div>
           <div className="lid-presets"><Button variant="outline" size="sm" onClick={()=>animateLid(0)}>关闭</Button><Button variant="outline" size="sm" onClick={()=>animateLid(60)}>半开</Button><Button variant="outline" size="sm" onClick={()=>animateLid(110)}>打开</Button><Button size="sm" onClick={()=>animateLid(180)}>翻至背面</Button></div>
-        </section>
+        </section>}
       </aside>
     </div>
   </main>;
