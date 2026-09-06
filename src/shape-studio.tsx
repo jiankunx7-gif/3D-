@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Camera, Copy, Cylinder, DoorOpen, Download, Grid3X3, LocateFixed, Maximize2, Minus, MousePointer2, Move3D, Plus, Redo2, Rotate3D, Shirt } from "lucide-react";
+import { Box, Camera, Circle, Copy, Cylinder, DoorOpen, Download, Grid3X3, Link2, LocateFixed, Maximize2, Minus, MousePointer2, Move3D, Plus, Redo2, Rotate3D, Shirt } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { garmentFaces } from './garment-model';
@@ -9,9 +9,9 @@ import { garmentFaces } from './garment-model';
 type ShapeType = "box" | "cylinder" | "garment";
 type Dimensions = { width: number; height: number; depth: number; scale: number };
 type Vec3 = [number, number, number];
-type ShapeWorkspace = { dimensions: Dimensions; positions: Vec3[]; lidAngles: number[]; selectedIndex: number };
+type ShapeWorkspace = { dimensions: Dimensions; positions: Vec3[]; lidAngles: number[]; crownRoundness: number[]; hookCounts: number[]; selectedIndex: number };
 type Mesh = { vertices: Vec3[]; faces: number[][] };
-type SceneFace = { points: Vec3[]; material: "body" | "lid" | "inside" | "trim" };
+type SceneFace = { points: Vec3[]; material: "body" | "lid" | "inside" | "trim" | "hook" };
 type InstanceFace = SceneFace & { instanceIndex: number };
 type HitRegion = { index: number; x: number; y: number; radius: number };
 const GROUND_Y = -0.64;
@@ -22,7 +22,7 @@ const CANVAS_EDGE_PADDING = 12;
 const SHAPES = [
   { id: "box" as const, label: "长方体", icon: Box },
   { id: "cylinder" as const, label: "圆柱体", icon: Cylinder },
-  { id: "garment" as const, label: "礼服套", icon: Shirt },
+  { id: "garment" as const, label: "西服套", icon: Shirt },
 ];
 
 function boxMesh(): Mesh {
@@ -64,8 +64,8 @@ function hingeRotate([x, y, z]: Vec3, hingeY: number, hingeZ: number, angle: num
   return [x, hingeY + dy * c - dz * s, hingeZ + dy * s + dz * c];
 }
 
-function sceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle: number): SceneFace[] {
-  if (shape === 'garment') return garmentFaces(dimensions);
+function sceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle: number, roundness = 72, hookCount = 0): SceneFace[] {
+  if (shape === 'garment') return garmentFaces(dimensions, roundness, hookCount);
   const width = dimensions.width * dimensions.scale;
   const height = dimensions.height * dimensions.scale;
   const depth = dimensions.depth * dimensions.scale;
@@ -118,10 +118,10 @@ function sceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle: number):
   return faces;
 }
 
-function positionedSceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngles: number[], positions: Vec3[]): InstanceFace[] {
+function positionedSceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngles: number[], crownRoundness: number[], hookCounts: number[], positions: Vec3[]): InstanceFace[] {
   const fit = shape === 'garment' ? 1 : Math.max(dimensions.width * dimensions.scale, dimensions.height * dimensions.scale, dimensions.depth * dimensions.scale, .1);
   return positions.flatMap(([offsetX, offsetY, offsetZ], instanceIndex) =>
-    sceneFaces(shape, dimensions, lidAngles[instanceIndex] ?? 0).map(({ points, material }) => ({
+    sceneFaces(shape, dimensions, lidAngles[instanceIndex] ?? 0, crownRoundness[instanceIndex] ?? 72, hookCounts[instanceIndex] ?? 0).map(({ points, material }) => ({
       material,
       instanceIndex,
       points: points.map(([x,y,z]) => [x / fit + offsetX, y / fit + offsetY, z / fit + offsetZ] as Vec3),
@@ -149,9 +149,9 @@ function inverseRotate([x, y, z]: Vec3, yaw: number, pitch: number): Vec3 {
   return [x * cy - z1 * sy, y1, x * sy + z1 * cy];
 }
 
-function calculateZoomLimit(shape: ShapeType, dimensions: Dimensions, rotation: { yaw: number; pitch: number }, focalLength: number, lidAngles: number[], positions: Vec3[], width: number, height: number) {
+function calculateZoomLimit(shape: ShapeType, dimensions: Dimensions, rotation: { yaw: number; pitch: number }, focalLength: number, lidAngles: number[], crownRoundness: number[], hookCounts: number[], positions: Vec3[], width: number, height: number) {
   if (width <= 0 || height <= 0) return 1.72;
-  const points = positionedSceneFaces(shape, dimensions, lidAngles, positions)
+  const points = positionedSceneFaces(shape, dimensions, lidAngles, crownRoundness, hookCounts, positions)
     .flatMap((face) => face.points)
     .map((point) => rotate(point, rotation.yaw, rotation.pitch));
   if (!points.length) return 1.72;
@@ -180,7 +180,7 @@ function calculateZoomLimit(shape: ShapeType, dimensions: Dimensions, rotation: 
   return Math.max(.03, Math.min(MAX_ZOOM_SEARCH, low));
 }
 
-function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, shape: ShapeType, dimensions: Dimensions, rotation: { yaw: number; pitch: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, lidAngles: number[], positions: Vec3[], selectedIndex: number) {
+function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, shape: ShapeType, dimensions: Dimensions, rotation: { yaw: number; pitch: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, lidAngles: number[], crownRoundness: number[], hookCounts: number[], positions: Vec3[], selectedIndex: number) {
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = canvas?.parentElement;
@@ -200,7 +200,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
       const background = ctx.createRadialGradient(w * .52, h * .4, 12, w * .52, h * .4, Math.max(w,h) * .72);
       background.addColorStop(0, "#ffffff"); background.addColorStop(.48, "#f7f8f9"); background.addColorStop(1, "#eef1f3");
       ctx.fillStyle = background; ctx.fillRect(0, 0, w, h);
-      const scene = positionedSceneFaces(shape, dimensions, lidAngles, positions);
+      const scene = positionedSceneFaces(shape, dimensions, lidAngles, crownRoundness, hookCounts, positions);
       const lensRatio = focalLength / 35;
       const cameraDistance = (4.25 * lensRatio) / zoom;
       const focal = Math.min(w, h) * 1.75 * lensRatio;
@@ -254,9 +254,9 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
         ctx.beginPath();
         projected.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
         ctx.closePath();
-        ctx.fillStyle = material === "trim" ? `hsl(215 12% ${55 + shade * 28}%)` : material === "inside" ? "hsl(216 20% 20%)" : material === "lid" ? `hsl(20 92% ${49 + shade * 24}%)` : `hsl(18 88% ${42 + shade * 24}%)`;
+        ctx.fillStyle = material === "hook" ? `hsl(215 9% ${34 + shade * 42}%)` : material === "trim" ? `hsl(20 35% ${48 + shade * 30}%)` : material === "inside" ? "hsl(216 20% 20%)" : material === "lid" ? `hsl(20 92% ${49 + shade * 24}%)` : `hsl(18 88% ${42 + shade * 24}%)`;
         ctx.fill();
-        ctx.strokeStyle = material === "inside" ? "rgba(255,255,255,.08)" : material === "lid" ? "rgba(90,34,12,.38)" : "rgba(68,28,12,.22)";
+        ctx.strokeStyle = material === "inside" ? "rgba(255,255,255,.08)" : material === "hook" ? "rgba(24,33,45,.48)" : material === "lid" ? "rgba(90,34,12,.38)" : "rgba(68,28,12,.22)";
         ctx.lineWidth = material === "lid" ? 1 : .75;
         ctx.stroke();
       }
@@ -296,7 +296,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
     const observer = new ResizeObserver(() => draw());
     observer.observe(container);
     return () => { observer.disconnect(); drawSceneRef.current = null; };
-  }, [canvasRef, hitRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, positions, selectedIndex]);
+  }, [canvasRef, hitRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, hookCounts, positions, selectedIndex]);
 }
 
 function DimensionControl({ label, axis, value, unit, onChange }: { label: string; axis: string; value: number; unit: string; onChange: (value: number) => void }) {
@@ -316,9 +316,9 @@ export default function ShapeStudio() {
   const [shape, setShape] = useState<ShapeType>("garment");
   const isGarment = shape === "garment";
   const [workspaces, setWorkspaces] = useState<Record<ShapeType, ShapeWorkspace>>({
-    garment: { dimensions: { width: 1, height: 1, depth: 1, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], selectedIndex: 0 },
-    box: { dimensions: { width: 4, height: 3, depth: 2.5, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], selectedIndex: 0 },
-    cylinder: { dimensions: { width: 3, height: 4, depth: 3, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], selectedIndex: 0 },
+    garment: { dimensions: { width: 1, height: 1, depth: 1, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [72], hookCounts: [0], selectedIndex: 0 },
+    box: { dimensions: { width: 4, height: 3, depth: 2.5, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [0], hookCounts: [0], selectedIndex: 0 },
+    cylinder: { dimensions: { width: 3, height: 4, depth: 3, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [0], hookCounts: [0], selectedIndex: 0 },
   });
   const [rotation, setRotation] = useState({ yaw: -.62, pitch: -.38 });
   const [zoom, setZoom] = useState(1);
@@ -327,17 +327,19 @@ export default function ShapeStudio() {
   const [groundEnabled, setGroundEnabled] = useState(false);
   const [focalLength, setFocalLength] = useState(35);
   const [captureStatus, setCaptureStatus] = useState(false);
-  const { dimensions, positions, lidAngles, selectedIndex } = workspaces[shape];
+  const { dimensions, positions, lidAngles, crownRoundness, hookCounts, selectedIndex } = workspaces[shape];
   const quantity = positions.length;
   const dimensionLabel = (value: number) => isGarment ? `${Math.round(value * 100)}%` : `${value.toFixed(1)} cm`;
   const selectedLidAngle = lidAngles[selectedIndex] ?? 0;
+  const selectedRoundness = crownRoundness[selectedIndex] ?? 72;
+  const selectedHookCount = hookCounts[selectedIndex] ?? 0;
   const groundMinY = groundOffsetFor(shape, dimensions, selectedLidAngle);
-  useCanvasRenderer(canvasRef, hitRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, positions, selectedIndex);
+  useCanvasRenderer(canvasRef, hitRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, hookCounts, positions, selectedIndex);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const updateLimit = () => {
-      const nextLimit = calculateZoomLimit(shape, dimensions, rotation, focalLength, lidAngles, positions, canvas.clientWidth, canvas.clientHeight);
+      const nextLimit = calculateZoomLimit(shape, dimensions, rotation, focalLength, lidAngles, crownRoundness, hookCounts, positions, canvas.clientWidth, canvas.clientHeight);
       setZoomLimit(nextLimit);
       setZoom((current) => Math.min(current, nextLimit));
     };
@@ -345,7 +347,7 @@ export default function ShapeStudio() {
     const observer = new ResizeObserver(updateLimit);
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, [shape, dimensions, rotation, focalLength, lidAngles, positions]);
+  }, [shape, dimensions, rotation, focalLength, lidAngles, crownRoundness, hookCounts, positions]);
   const updateWorkspace = useCallback((targetShape: ShapeType, updater: (workspace: ShapeWorkspace) => ShapeWorkspace) => {
     setWorkspaces((current) => ({ ...current, [targetShape]: updater(current[targetShape]) }));
   }, []);
@@ -376,7 +378,9 @@ export default function ShapeStudio() {
         return [((index % 3) - 1) * .14, groundEnabled ? groundOffsetFor(shape, workspace.dimensions, 0) : Math.floor(index / 3) * .1, 0] as Vec3;
       })];
       const nextLidAngles = next <= workspace.lidAngles.length ? workspace.lidAngles.slice(0, next) : [...workspace.lidAngles, ...Array(next - workspace.lidAngles.length).fill(0)];
-      return { ...workspace, positions: nextPositions, lidAngles: nextLidAngles, selectedIndex: Math.min(next - 1, workspace.selectedIndex) };
+      const nextRoundness = next <= workspace.crownRoundness.length ? workspace.crownRoundness.slice(0, next) : [...workspace.crownRoundness, ...Array(next - workspace.crownRoundness.length).fill(72)];
+      const nextHookCounts = next <= workspace.hookCounts.length ? workspace.hookCounts.slice(0, next) : [...workspace.hookCounts, ...Array(next - workspace.hookCounts.length).fill(0)];
+      return { ...workspace, positions: nextPositions, lidAngles: nextLidAngles, crownRoundness: nextRoundness, hookCounts: nextHookCounts, selectedIndex: Math.min(next - 1, workspace.selectedIndex) };
     });
   };
   const changePosition = (axis: 0 | 1 | 2, value: number) => {
@@ -387,6 +391,14 @@ export default function ShapeStudio() {
     ...workspace,
     lidAngles: workspace.lidAngles.map((value, index) => index === workspace.selectedIndex ? angle : value),
     positions: workspace.positions.map(([x,y,z], index) => index === workspace.selectedIndex && groundEnabled ? [x, Math.max(y,groundOffsetFor(shape,workspace.dimensions,angle)), z] as Vec3 : [x,y,z] as Vec3),
+  }));
+  const changeSelectedRoundness = (roundness: number) => updateWorkspace("garment", (workspace) => ({
+    ...workspace,
+    crownRoundness: workspace.crownRoundness.map((value, index) => index === workspace.selectedIndex ? roundness : value),
+  }));
+  const changeSelectedHookCount = (count: number) => updateWorkspace("garment", (workspace) => ({
+    ...workspace,
+    hookCounts: workspace.hookCounts.map((value, index) => index === workspace.selectedIndex ? Math.max(0, Math.min(6, Math.round(count))) : value),
   }));
   const resetView = () => { setRotation({ yaw: -.62, pitch: -.38 }); setZoom(1); };
   const setView = (view: "front" | "top" | "iso") => {
@@ -457,7 +469,7 @@ export default function ShapeStudio() {
       <aside className="control-panel" aria-label="模型与摄像机控制"><div className="panel-title"><span>02</span><div><strong>调整尺寸</strong><small>实时改变比例</small></div></div><div className="controls">
         {isGarment ? <><DimensionControl label="宽度" axis="W" value={Math.round(dimensions.width * 100)} unit="%" onChange={(v)=>changeDimension("width",v / 100)} /><DimensionControl label="高度" axis="H" value={Math.round(dimensions.height * 100)} unit="%" onChange={(v)=>changeDimension("height",v / 100)} /><DimensionControl label="厚度" axis="D" value={Math.round(dimensions.depth * 100)} unit="%" onChange={(v)=>changeDimension("depth",v / 100)} /></> : <><DimensionControl label="长度" axis="W" value={dimensions.width} unit="cm" onChange={(v)=>changeDimension("width",v)} /><DimensionControl label="高度" axis="H" value={dimensions.height} unit="cm" onChange={(v)=>changeDimension("height",v)} /><DimensionControl label="深度" axis="D" value={dimensions.depth} unit="cm" onChange={(v)=>changeDimension("depth",v)} /></>}
         <div className="scale-control"><div className="control-heading"><span><Maximize2 size={16}/>整体大小</span><output>{dimensions.scale.toFixed(1)}×</output></div><Slider aria-label="整体大小" min={.5} max={2} step={.1} value={[dimensions.scale]} onValueChange={([next])=>changeDimension("scale",next)} /><div className="slider-ends"><span>0.5×</span><span>2.0×</span></div></div>
-      </div><div className="size-summary"><span>{isGarment ? "宽 × 高 × 厚 · 相对比例" : "当前尺寸"}</span><strong>{dimensionLabel(dimensions.width)} × {dimensionLabel(dimensions.height)} × {dimensionLabel(dimensions.depth)}</strong><small>{isGarment ? "简化礼服套 · 无固定尺寸 · 100% 为初始比例" : `单位：厘米 · 比例 ${dimensions.scale.toFixed(1)}×`}</small>{isGarment && <Button variant="secondary" size="sm" onClick={()=>updateWorkspace("garment", (workspace)=>({...workspace, dimensions:{width:1,height:1,depth:1,scale:1}, positions:workspace.positions.map(([x,y,z])=>[x, groundEnabled ? Math.max(y, -.04) : y,z] as Vec3)}))}>恢复初始比例</Button>}</div>
+      </div><div className="size-summary"><span>{isGarment ? "宽 × 高 × 厚 · 相对比例" : "当前尺寸"}</span><strong>{dimensionLabel(dimensions.width)} × {dimensionLabel(dimensions.height)} × {dimensionLabel(dimensions.depth)}</strong><small>{isGarment ? "参数化西服套 · 无固定尺寸 · 不使用 OBJ" : `单位：厘米 · 比例 ${dimensions.scale.toFixed(1)}×`}</small>{isGarment && <Button variant="secondary" size="sm" onClick={()=>updateWorkspace("garment", (workspace)=>({...workspace, dimensions:{width:1,height:1,depth:1,scale:1}, positions:workspace.positions.map(([x,y,z])=>[x, groundEnabled ? Math.max(y, -.04) : y,z] as Vec3)}))}>恢复初始比例</Button>}</div>
         <section className="editor-section instance-section" aria-label="数量与自由摆放">
           <div className="section-heading"><span><Copy size={16}/>数量与自由摆放</span><output>{quantity} 个</output></div>
           <div className="quantity-stepper"><Button variant="outline" size="icon" aria-label="减少数量" disabled={quantity<=1} onClick={()=>changeQuantity(quantity-1)}><Minus size={14}/></Button><strong>{quantity}</strong><Button variant="outline" size="icon" aria-label="增加数量" disabled={quantity>=12} onClick={()=>changeQuantity(quantity+1)}><Plus size={14}/></Button></div>
@@ -469,6 +481,19 @@ export default function ShapeStudio() {
             {([0,1,2] as const).map((axis)=>{ const labels=["X 左右","Y 上下","Z 前后"]; const axisNames=["X","Y","Z"]; const minimum=axis===1&&groundEnabled?groundMinY:-2.5; const maximum=Math.max(2.5, minimum+2.5); return <div className="position-row" key={axis}><label><b>{axisNames[axis]}</b>{labels[axis]}</label><Slider aria-label={`${labels[axis]}位置`} min={minimum} max={maximum} step={.01} value={[positions[selectedIndex]?.[axis] ?? 0]} onValueChange={([next])=>changePosition(axis,next)} /><input aria-label={`${labels[axis]}坐标值`} type="number" min={minimum} max={maximum} step="0.01" value={(positions[selectedIndex]?.[axis] ?? 0).toFixed(2)} onChange={(e)=>changePosition(axis,Math.max(minimum,Math.min(maximum,Number(e.target.value)||0)))} /></div>; })}
           </div>
         </section>
+        {isGarment && <section className="editor-section garment-section" aria-label="西服套弧顶与挂钩">
+          <div className="section-heading"><span><Circle size={16}/>形体 {selectedIndex+1} 顶部弧度</span><output>{Math.round(selectedRoundness)}%</output></div>
+          <p>连续调整弧顶圆度；宽度与高度变化后仍保持平顺轮廓。</p>
+          <Slider aria-label={`形体 ${selectedIndex+1} 顶部弧顶圆度`} min={0} max={100} step={1} value={[selectedRoundness]} onValueChange={([next])=>changeSelectedRoundness(next)} />
+          <div className="lid-angle-range"><span>0% 平顶</span><span>100% 圆弧</span></div>
+          <div className="crown-presets"><Button variant="outline" size="sm" onClick={()=>changeSelectedRoundness(0)}>平顶</Button><Button variant="outline" size="sm" onClick={()=>changeSelectedRoundness(50)}>柔弧</Button><Button size="sm" onClick={()=>changeSelectedRoundness(100)}>圆弧</Button></div>
+          <div className="component-divider" />
+          <div className="section-heading"><span><Link2 size={16}/>顶部挂钩组件</span><output>{selectedHookCount ? `${selectedHookCount} 个` : "不使用"}</output></div>
+          <p>挂钩默认关闭；启用后会随当前弧顶、宽度和高度自动吸附。</p>
+          <div className="quantity-stepper"><Button variant="outline" size="icon" aria-label="减少挂钩" disabled={selectedHookCount<=0} onClick={()=>changeSelectedHookCount(selectedHookCount-1)}><Minus size={14}/></Button><strong>{selectedHookCount}</strong><Button variant="outline" size="icon" aria-label="增加挂钩" disabled={selectedHookCount>=6} onClick={()=>changeSelectedHookCount(selectedHookCount+1)}><Plus size={14}/></Button></div>
+          <Slider aria-label={`形体 ${selectedIndex+1} 挂钩数量`} min={0} max={6} step={1} value={[selectedHookCount]} onValueChange={([next])=>changeSelectedHookCount(next)} />
+          <div className="lid-angle-range"><span>0 个关闭</span><span>最多 6 个</span></div>
+        </section>}
         <section className="editor-section camera-section" aria-label="透视摄像机">
           <div className="section-heading"><span><Camera size={16}/>透视摄像机</span><output>{focalLength} mm</output></div>
           <div className="lens-presets">{[24,35,50,85,135].map((lens)=><Button key={lens} size="sm" variant={focalLength===lens?"default":"outline"} onClick={()=>setFocalLength(lens)}>{lens}</Button>)}</div>
