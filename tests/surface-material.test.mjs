@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cloneInstanceMaterials, decalPercent, normalizedModelColor, shadedModelColor, textureSizeFromPercent, updateSurfaceSelection } from '../src/surface-material.ts';
+import { cloneInstanceMaterials, decalPercent, normalizedModelColor, scaledDecalDimensions, shadedModelColor, textureSizeFromPercent, updateSurfaceSelection } from '../src/surface-material.ts';
 
 test('ordinary click replaces selection and shift click toggles surfaces', () => {
   assert.deepEqual(updateSurfaceSelection(['front'], 'back', false), ['back']);
@@ -34,4 +34,10 @@ test('decal position and independent width or height percentages are constrained
   assert.equal(decalPercent(-10), 0);
   assert.equal(decalPercent(240, 5, 200), 2);
   assert.equal(decalPercent(520, 5, 400), 4);
+});
+
+test('uniform decal scale preserves the custom width to height ratio', () => {
+  const scaled = scaledDecalDimensions(.8, .3, 2.5);
+  assert.deepEqual(scaled, { width:2, height:.75 });
+  assert.ok(Math.abs(scaled.width / scaled.height - .8 / .3) < 1e-12);
 });
