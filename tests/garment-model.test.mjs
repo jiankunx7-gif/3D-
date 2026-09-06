@@ -5,7 +5,7 @@ import { garmentBottomY, garmentFaces, garmentHookAnchor, garmentTopY } from '..
 const base = { width: 1, height: 1, depth: 1, scale: 1 };
 const points = (dimensions, roundness = 72) => garmentFaces(dimensions, roundness).flatMap((face) => face.points);
 const bodyPoints = (dimensions, roundness = 72) => garmentFaces(dimensions, roundness).filter((face) => face.material !== 'hook').flatMap((face) => face.points);
-const hookPoints = (dimensions, roundness = 72) => garmentFaces(dimensions, roundness, true).filter((face) => face.material === 'hook').flatMap((face) => face.points);
+const hookPoints = (dimensions, roundness = 72, hookSize = 1) => garmentFaces(dimensions, roundness, true, hookSize).filter((face) => face.material === 'hook').flatMap((face) => face.points);
 
 for (const [axis, name] of [[0, 'width'], [2, 'depth']]) {
   test(`${name} stretches only its own axis`, () => {
@@ -48,6 +48,16 @@ test('the reference-shaped hook is optional and attaches at the crown centre', (
   for (const dimensions of [{ ...base, width: 4 }, { ...base, height: 4 }, { ...base, depth: 4 }]) {
     assert.deepEqual(hookPoints(dimensions), initial);
   }
+});
+
+test('hook size scales independently around the fixed crown attachment', () => {
+  const anchorY = garmentHookAnchor(72)[1] * 1.38;
+  const small = hookPoints(base, 72, .5);
+  const large = hookPoints(base, 72, 2);
+  const smallReach = Math.max(...small.map((point) => point[1])) - anchorY;
+  const largeReach = Math.max(...large.map((point) => point[1])) - anchorY;
+  assert.ok(Math.abs(largeReach / smallReach - 4) < 1e-10);
+  assert.deepEqual(bodyPoints(base, 72), garmentFaces(base, 72, true, 2).filter((face) => face.material !== 'hook').flatMap((face) => face.points));
 });
 
 test('whole scale scales all axes and geometry stays lightweight', () => {
