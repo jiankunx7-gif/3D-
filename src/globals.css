@@ -129,6 +129,11 @@ button, input { font: inherit; }
 .lid-angle-range { display: flex; justify-content: space-between; color: #a08a80; font: 500 8px/1 monospace; }
 .lid-presets { display: grid; grid-template-columns: repeat(4,1fr); gap: 5px; }
 .lid-presets button { height: 30px; font-size: 9px; box-shadow: none; }
+.garment-section { padding: 18px; border: 1px solid #f1c2aa; border-radius: 8px; background: linear-gradient(145deg, #fffaf7, #fff5ef); }
+.garment-section p { margin: -4px 0 0; color: #8c756a; font-size: 9px; line-height: 1.5; }
+.crown-presets { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; }
+.crown-presets button { height: 30px; font-size: 9px; box-shadow: none; }
+.component-divider { height: 1px; margin: 3px 0; background: #f1d8ca; }
 .instance-section { padding: 18px; border: 1px solid #dbe1e6; border-radius: 8px; background: rgba(247,249,250,.82); }
 .quantity-stepper { display: grid; grid-template-columns: 32px 1fr 32px; align-items: center; gap: 8px; }
 .quantity-stepper button { width: 32px; height: 30px; padding: 0; color: #65717f; box-shadow: none; }
@@ -151,7 +156,7 @@ button, input { font: inherit; }
   .workspace { grid-template-columns: 190px minmax(380px,1fr); }
   .control-panel { grid-column: 1/-1; border-left: 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: 150px 1fr 220px; gap: 26px; align-items: start; max-height: none; overflow: visible; }
   .control-panel .panel-title { margin: 0; }.controls { grid-template-columns: repeat(4,1fr); gap: 22px; }.scale-control { border: 0; padding: 0; }.size-summary { margin: 0; }
-  .control-panel .instance-section { grid-column: 1; margin-top: 0; }.control-panel .camera-section { grid-column: 2; margin-top: 0; }.control-panel .lid-section { grid-column: 3; margin-top: 0; }
+  .control-panel .instance-section { grid-column: 1; margin-top: 0; }.control-panel .camera-section { grid-column: 2; margin-top: 0; }.control-panel .lid-section, .control-panel .garment-section { grid-column: 3; margin-top: 0; }
 }
 @media (max-width: 720px) {
   .topbar { height: 62px; padding: 0 17px; }.workspace { display: flex; flex-direction: column; }.shape-panel { border-right: 0; border-bottom: 1px solid var(--line); padding: 17px; }
