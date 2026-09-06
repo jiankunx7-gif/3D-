@@ -159,6 +159,15 @@ button, input { font: inherit; }
 .position-row input:focus { border-color: #ee946b; box-shadow: 0 0 0 2px rgba(238,106,53,.1); }
 .material-section { padding: 18px; border: 1px solid #d7dfe5; border-radius: 8px; background: linear-gradient(145deg, #fbfcfd, #f3f6f8); }
 .material-section > p { margin: -4px 0 0; color: #74808d; font-size: 9px; line-height: 1.55; }
+.model-color-control { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px; border: 1px solid #dce3e8; border-radius: 6px; background: rgba(255,255,255,.72); }
+.model-color-control > div { min-width: 0; display: flex; align-items: center; gap: 9px; }
+.color-preview { width: 24px; height: 24px; flex: none; border: 2px solid white; border-radius: 50%; box-shadow: 0 0 0 1px #d6dde3, 0 3px 8px rgba(26,36,47,.1); }
+.model-color-control p { min-width: 0; margin: 0; display: grid; gap: 4px; }
+.model-color-control strong { color: #52606e; font-size: 9px; }
+.model-color-control small { color: #89949f; font-size: 7px; line-height: 1.35; }
+.color-picker { height: 29px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 7px 0 4px; border: 1px solid #dce2e7; border-radius: 5px; background: #f7f8f9; cursor: pointer; }
+.color-picker input { width: 23px; height: 21px; padding: 0; border: 0; border-radius: 3px; background: transparent; cursor: pointer; }
+.color-picker span { color: #65727f; font: 700 8px/1 monospace; }
 .material-mode-button { width: 100%; gap: 7px; height: 32px; font-size: 10px; box-shadow: none; }
 .material-empty { padding: 13px 10px; border: 1px dashed #cbd4dc; border-radius: 6px; color: #8a96a2; background: rgba(255,255,255,.62); text-align: center; font-size: 8px; line-height: 1.5; }
 .selected-surface-list { display: flex; flex-wrap: wrap; gap: 5px; max-height: 66px; overflow-y: auto; }
@@ -178,6 +187,19 @@ button, input { font: inherit; }
 .texture-size-control { display: grid; gap: 13px; padding: 4px 2px 0; }
 .texture-size-control output { color: var(--accent-deep); font: 700 11px/1 monospace; }
 .texture-value-field input { width: 48px; }
+.material-divider { background: #dce3e8; }
+.decal-heading { display: flex; align-items: center; justify-content: space-between; color: #52606e; }
+.decal-heading > span { display: flex; align-items: center; gap: 7px; font-size: 10px; font-weight: 700; }
+.decal-heading svg { color: #7359a8; }
+.decal-heading small { color: #978aac; font: 700 8px/1 monospace; }
+.decal-upload { color: #674c96; border-color: #cbbce4; background: #faf7ff; }
+.decal-upload:hover { color: #593d88; border-color: #aa94ce; background: white; }
+.decal-status { border-color: #ded5ed; background: #fbf9fe; }
+.decal-status .status-dot { background: #8062b1; box-shadow: 0 0 0 4px rgba(128,98,177,.12); }
+.decal-status strong { color: #64507f; }
+.decal-controls { display: grid; gap: 14px; padding: 3px 2px 0; }
+.decal-control-row { display: grid; gap: 10px; }
+.decal-control-row .control-heading > span { font-size: 9px; }
 .projection-note { display: flex; align-items: flex-start; gap: 7px; padding-top: 11px; border-top: 1px solid #dce3e8; color: #7a8692; font-size: 8px; line-height: 1.5; }
 .projection-note svg { flex: none; color: #58738a; }
 
