@@ -1,15 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Camera, Circle, Copy, Cylinder, DoorOpen, Download, Grid3X3, LocateFixed, Maximize2, Minus, MousePointer2, Move3D, Plus, Redo2, Rotate3D, Shirt } from "lucide-react";
+import { Box, Camera, Circle, Copy, Cylinder, DoorOpen, Download, Grid3X3, Link2, LocateFixed, Maximize2, Minus, MousePointer2, Move3D, Plus, Redo2, Rotate3D, Shirt } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { garmentFaces } from './garment-model';
+import { boundsOverlap, resolveCollisionMove, spawnBeside, worldBounds, type CollisionBounds } from './collision';
 
 type ShapeType = "box" | "cylinder" | "garment";
 type Dimensions = { width: number; height: number; depth: number; scale: number };
 type Vec3 = [number, number, number];
-type ShapeWorkspace = { dimensions: Dimensions; positions: Vec3[]; lidAngles: number[]; crownRoundness: number[]; selectedIndex: number };
+type ShapeWorkspace = { dimensions: Dimensions; positions: Vec3[]; lidAngles: number[]; crownRoundness: number[]; hookEnabled: boolean[]; selectedIndex: number };
 type Mesh = { vertices: Vec3[]; faces: number[][] };
 type SceneFace = { points: Vec3[]; material: "body" | "lid" | "inside" | "trim" | "hook" };
 type InstanceFace = SceneFace & { instanceIndex: number };
@@ -64,8 +65,8 @@ function hingeRotate([x, y, z]: Vec3, hingeY: number, hingeZ: number, angle: num
   return [x, hingeY + dy * c - dz * s, hingeZ + dy * s + dz * c];
 }
 
-function sceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle: number, roundness = 72): SceneFace[] {
-  if (shape === 'garment') return garmentFaces(dimensions, roundness);
+function sceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle: number, roundness = 72, hookEnabled = false): SceneFace[] {
+  if (shape === 'garment') return garmentFaces(dimensions, roundness, hookEnabled);
   const width = dimensions.width * dimensions.scale;
   const height = dimensions.height * dimensions.scale;
   const depth = dimensions.depth * dimensions.scale;
@@ -118,10 +119,10 @@ function sceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle: number, 
   return faces;
 }
 
-function positionedSceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngles: number[], crownRoundness: number[], positions: Vec3[]): InstanceFace[] {
+function positionedSceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngles: number[], crownRoundness: number[], hookEnabled: boolean[], positions: Vec3[]): InstanceFace[] {
   const fit = shape === 'garment' ? 1 : Math.max(dimensions.width * dimensions.scale, dimensions.height * dimensions.scale, dimensions.depth * dimensions.scale, .1);
   return positions.flatMap(([offsetX, offsetY, offsetZ], instanceIndex) =>
-    sceneFaces(shape, dimensions, lidAngles[instanceIndex] ?? 0, crownRoundness[instanceIndex] ?? 72).map(({ points, material }) => ({
+    sceneFaces(shape, dimensions, lidAngles[instanceIndex] ?? 0, crownRoundness[instanceIndex] ?? 72, hookEnabled[instanceIndex] ?? false).map(({ points, material }) => ({
       material,
       instanceIndex,
       points: points.map(([x,y,z]) => [x / fit + offsetX, y / fit + offsetY, z / fit + offsetZ] as Vec3),
@@ -133,6 +134,42 @@ function groundOffsetFor(shape: ShapeType, dimensions: Dimensions, lidAngle: num
   const fit = shape === 'garment' ? 1 : Math.max(dimensions.width * dimensions.scale, dimensions.height * dimensions.scale, dimensions.depth * dimensions.scale, .1);
   const lowestPoint = Math.min(...sceneFaces(shape, dimensions, lidAngle).flatMap((face) => face.points.map((point) => point[1]))) / fit;
   return GROUND_Y - lowestPoint;
+}
+
+function localBoundsFor(shape: ShapeType, dimensions: Dimensions, lidAngle: number, roundness: number, hookEnabled: boolean): CollisionBounds {
+  const fit = shape === 'garment' ? 1 : Math.max(dimensions.width * dimensions.scale, dimensions.height * dimensions.scale, dimensions.depth * dimensions.scale, .1);
+  const points = sceneFaces(shape, dimensions, lidAngle, roundness, hookEnabled).flatMap((face) => face.points);
+  return {
+    min: ([0, 1, 2] as const).map((axis) => Math.min(...points.map((point) => point[axis])) / fit) as Vec3,
+    max: ([0, 1, 2] as const).map((axis) => Math.max(...points.map((point) => point[axis])) / fit) as Vec3,
+  };
+}
+
+function collisionSafePosition(shape: ShapeType, workspace: ShapeWorkspace, index: number, desiredPosition: Vec3, groundEnabled: boolean) {
+  const current = workspace.positions[index] ?? [0, 0, 0];
+  const desired = [...desiredPosition] as Vec3;
+  if (groundEnabled) desired[1] = Math.max(desired[1], groundOffsetFor(shape, workspace.dimensions, workspace.lidAngles[index] ?? 0));
+  const movingBounds = localBoundsFor(shape, workspace.dimensions, workspace.lidAngles[index] ?? 0, workspace.crownRoundness[index] ?? 72, workspace.hookEnabled[index] ?? false);
+  const obstacles = workspace.positions.flatMap((position, obstacleIndex) => obstacleIndex === index ? [] : [worldBounds(
+    localBoundsFor(shape, workspace.dimensions, workspace.lidAngles[obstacleIndex] ?? 0, workspace.crownRoundness[obstacleIndex] ?? 72, workspace.hookEnabled[obstacleIndex] ?? false),
+    position,
+  )]);
+  return resolveCollisionMove(current, desired, movingBounds, obstacles) as Vec3;
+}
+
+function separateOverlappingInstances(shape: ShapeType, workspace: ShapeWorkspace, groundEnabled: boolean): ShapeWorkspace {
+  const placedBounds: CollisionBounds[] = [];
+  const positions = workspace.positions.map((position, index) => {
+    const localBounds = localBoundsFor(shape, workspace.dimensions, workspace.lidAngles[index] ?? 0, workspace.crownRoundness[index] ?? 72, workspace.hookEnabled[index] ?? false);
+    const groundY = groundEnabled ? groundOffsetFor(shape, workspace.dimensions, workspace.lidAngles[index] ?? 0) : position[1];
+    let nextPosition = [position[0], Math.max(position[1], groundY), position[2]] as Vec3;
+    if (placedBounds.some((bounds) => boundsOverlap(worldBounds(localBounds, nextPosition), bounds))) {
+      nextPosition = spawnBeside(localBounds, placedBounds, groundY, position[2]) as Vec3;
+    }
+    placedBounds.push(worldBounds(localBounds, nextPosition));
+    return nextPosition;
+  });
+  return { ...workspace, positions };
 }
 
 function rotate([x, y, z]: Vec3, yaw: number, pitch: number): Vec3 {
@@ -149,9 +186,9 @@ function inverseRotate([x, y, z]: Vec3, yaw: number, pitch: number): Vec3 {
   return [x * cy - z1 * sy, y1, x * sy + z1 * cy];
 }
 
-function calculateZoomLimit(shape: ShapeType, dimensions: Dimensions, rotation: { yaw: number; pitch: number }, focalLength: number, lidAngles: number[], crownRoundness: number[], positions: Vec3[], width: number, height: number) {
+function calculateZoomLimit(shape: ShapeType, dimensions: Dimensions, rotation: { yaw: number; pitch: number }, focalLength: number, lidAngles: number[], crownRoundness: number[], hookEnabled: boolean[], positions: Vec3[], width: number, height: number) {
   if (width <= 0 || height <= 0) return 1.72;
-  const points = positionedSceneFaces(shape, dimensions, lidAngles, crownRoundness, positions)
+  const points = positionedSceneFaces(shape, dimensions, lidAngles, crownRoundness, hookEnabled, positions)
     .flatMap((face) => face.points)
     .map((point) => rotate(point, rotation.yaw, rotation.pitch));
   if (!points.length) return 1.72;
@@ -180,7 +217,7 @@ function calculateZoomLimit(shape: ShapeType, dimensions: Dimensions, rotation: 
   return Math.max(.03, Math.min(MAX_ZOOM_SEARCH, low));
 }
 
-function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, shape: ShapeType, dimensions: Dimensions, rotation: { yaw: number; pitch: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, lidAngles: number[], crownRoundness: number[], positions: Vec3[], selectedIndex: number) {
+function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, shape: ShapeType, dimensions: Dimensions, rotation: { yaw: number; pitch: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, lidAngles: number[], crownRoundness: number[], hookEnabled: boolean[], positions: Vec3[], selectedIndex: number) {
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = canvas?.parentElement;
@@ -200,7 +237,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
       const background = ctx.createRadialGradient(w * .52, h * .4, 12, w * .52, h * .4, Math.max(w,h) * .72);
       background.addColorStop(0, "#ffffff"); background.addColorStop(.48, "#f7f8f9"); background.addColorStop(1, "#eef1f3");
       ctx.fillStyle = background; ctx.fillRect(0, 0, w, h);
-      const scene = positionedSceneFaces(shape, dimensions, lidAngles, crownRoundness, positions);
+      const scene = positionedSceneFaces(shape, dimensions, lidAngles, crownRoundness, hookEnabled, positions);
       const lensRatio = focalLength / 35;
       const cameraDistance = (4.25 * lensRatio) / zoom;
       const focal = Math.min(w, h) * 1.75 * lensRatio;
@@ -296,7 +333,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
     const observer = new ResizeObserver(() => draw());
     observer.observe(container);
     return () => { observer.disconnect(); drawSceneRef.current = null; };
-  }, [canvasRef, hitRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, positions, selectedIndex]);
+  }, [canvasRef, hitRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, hookEnabled, positions, selectedIndex]);
 }
 
 function DimensionControl({ label, axis, value, unit, minValue, maxValue, onChange }: { label: string; axis: string; value: number; unit: string; minValue?: number; maxValue?: number; onChange: (value: number) => void }) {
@@ -316,9 +353,9 @@ export default function ShapeStudio() {
   const [shape, setShape] = useState<ShapeType>("garment");
   const isGarment = shape === "garment";
   const [workspaces, setWorkspaces] = useState<Record<ShapeType, ShapeWorkspace>>({
-    garment: { dimensions: { width: 1, height: 1, depth: 1, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [72], selectedIndex: 0 },
-    box: { dimensions: { width: 4, height: 3, depth: 2.5, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [0], selectedIndex: 0 },
-    cylinder: { dimensions: { width: 3, height: 4, depth: 3, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [0], selectedIndex: 0 },
+    garment: { dimensions: { width: 1, height: 1, depth: 1, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [72], hookEnabled: [false], selectedIndex: 0 },
+    box: { dimensions: { width: 4, height: 3, depth: 2.5, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [0], hookEnabled: [false], selectedIndex: 0 },
+    cylinder: { dimensions: { width: 3, height: 4, depth: 3, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [0], hookEnabled: [false], selectedIndex: 0 },
   });
   const [rotation, setRotation] = useState({ yaw: -.62, pitch: -.38 });
   const [zoom, setZoom] = useState(1);
@@ -327,18 +364,19 @@ export default function ShapeStudio() {
   const [groundEnabled, setGroundEnabled] = useState(false);
   const [focalLength, setFocalLength] = useState(35);
   const [captureStatus, setCaptureStatus] = useState(false);
-  const { dimensions, positions, lidAngles, crownRoundness, selectedIndex } = workspaces[shape];
+  const { dimensions, positions, lidAngles, crownRoundness, hookEnabled, selectedIndex } = workspaces[shape];
   const quantity = positions.length;
   const dimensionLabel = (value: number) => isGarment ? `${Math.round(value * 100)}%` : `${value.toFixed(1)} cm`;
   const selectedLidAngle = lidAngles[selectedIndex] ?? 0;
   const selectedRoundness = crownRoundness[selectedIndex] ?? 72;
+  const selectedHookEnabled = hookEnabled[selectedIndex] ?? false;
   const groundMinY = groundOffsetFor(shape, dimensions, selectedLidAngle);
-  useCanvasRenderer(canvasRef, hitRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, positions, selectedIndex);
+  useCanvasRenderer(canvasRef, hitRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, hookEnabled, positions, selectedIndex);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const updateLimit = () => {
-      const nextLimit = calculateZoomLimit(shape, dimensions, rotation, focalLength, lidAngles, crownRoundness, positions, canvas.clientWidth, canvas.clientHeight);
+      const nextLimit = calculateZoomLimit(shape, dimensions, rotation, focalLength, lidAngles, crownRoundness, hookEnabled, positions, canvas.clientWidth, canvas.clientHeight);
       setZoomLimit(nextLimit);
       setZoom((current) => Math.min(current, nextLimit));
     };
@@ -346,54 +384,94 @@ export default function ShapeStudio() {
     const observer = new ResizeObserver(updateLimit);
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, [shape, dimensions, rotation, focalLength, lidAngles, crownRoundness, positions]);
+  }, [shape, dimensions, rotation, focalLength, lidAngles, crownRoundness, hookEnabled, positions]);
   const updateWorkspace = useCallback((targetShape: ShapeType, updater: (workspace: ShapeWorkspace) => ShapeWorkspace) => {
     setWorkspaces((current) => ({ ...current, [targetShape]: updater(current[targetShape]) }));
   }, []);
   const changeDimension = useCallback((key: keyof Dimensions, value: number) => updateWorkspace(shape, (workspace) => {
     const nextDimensions = { ...workspace.dimensions, [key]: value };
-    if (!groundEnabled) return { ...workspace, dimensions: nextDimensions };
-    return { ...workspace, dimensions: nextDimensions, positions: workspace.positions.map(([x,y,z], index) => {
+    const resized = { ...workspace, dimensions: nextDimensions, positions: workspace.positions.map(([x,y,z], index) => {
+      if (!groundEnabled) return [x,y,z] as Vec3;
       const oldGroundY = groundOffsetFor(shape, workspace.dimensions, workspace.lidAngles[index] ?? 0);
       const nextGroundY = groundOffsetFor(shape, nextDimensions, workspace.lidAngles[index] ?? 0);
       return [x, Math.abs(y-oldGroundY)<.02 ? nextGroundY : Math.max(y,nextGroundY), z] as Vec3;
     }) };
+    return separateOverlappingInstances(shape, resized, groundEnabled);
   }), [shape, groundEnabled, updateWorkspace]);
   const selectInstance = (index: number) => updateWorkspace(shape, (workspace) => ({ ...workspace, selectedIndex: index }));
   const toggleGround = () => {
     if (groundEnabled) { setGroundEnabled(false); return; }
-    setWorkspaces((current) => ({
-      garment: { ...current.garment, positions: current.garment.positions.map(([x,,z]) => [x, groundOffsetFor("garment", current.garment.dimensions, 0), z] as Vec3) },
-      box: { ...current.box, positions: current.box.positions.map(([x,,z], index) => [x, groundOffsetFor("box", current.box.dimensions, current.box.lidAngles[index] ?? 0), z] as Vec3) },
-      cylinder: { ...current.cylinder, positions: current.cylinder.positions.map(([x,,z], index) => [x, groundOffsetFor("cylinder", current.cylinder.dimensions, current.cylinder.lidAngles[index] ?? 0), z] as Vec3) },
-    }));
+    setWorkspaces((current) => {
+      const garment = { ...current.garment, positions: current.garment.positions.map(([x,,z]) => [x, groundOffsetFor("garment", current.garment.dimensions, 0), z] as Vec3) };
+      const box = { ...current.box, positions: current.box.positions.map(([x,,z], index) => [x, groundOffsetFor("box", current.box.dimensions, current.box.lidAngles[index] ?? 0), z] as Vec3) };
+      const cylinder = { ...current.cylinder, positions: current.cylinder.positions.map(([x,,z], index) => [x, groundOffsetFor("cylinder", current.cylinder.dimensions, current.cylinder.lidAngles[index] ?? 0), z] as Vec3) };
+      return {
+        garment: separateOverlappingInstances("garment", garment, true),
+        box: separateOverlappingInstances("box", box, true),
+        cylinder: separateOverlappingInstances("cylinder", cylinder, true),
+      };
+    });
     setGroundEnabled(true);
   };
   const changeQuantity = (nextQuantity: number) => {
     const next = Math.max(1, Math.min(12, Math.round(nextQuantity)));
     updateWorkspace(shape, (workspace) => {
-      const nextPositions = next <= workspace.positions.length ? workspace.positions.slice(0, next) : [...workspace.positions, ...Array.from({ length: next - workspace.positions.length }, (_, offset) => {
-        const index = workspace.positions.length + offset;
-        return [((index % 3) - 1) * .14, groundEnabled ? groundOffsetFor(shape, workspace.dimensions, 0) : Math.floor(index / 3) * .1, 0] as Vec3;
-      })];
-      const nextLidAngles = next <= workspace.lidAngles.length ? workspace.lidAngles.slice(0, next) : [...workspace.lidAngles, ...Array(next - workspace.lidAngles.length).fill(0)];
-      const nextRoundness = next <= workspace.crownRoundness.length ? workspace.crownRoundness.slice(0, next) : [...workspace.crownRoundness, ...Array(next - workspace.crownRoundness.length).fill(72)];
-      return { ...workspace, positions: nextPositions, lidAngles: nextLidAngles, crownRoundness: nextRoundness, selectedIndex: Math.min(next - 1, workspace.selectedIndex) };
+      if (next <= workspace.positions.length) return {
+        ...workspace,
+        positions: workspace.positions.slice(0, next),
+        lidAngles: workspace.lidAngles.slice(0, next),
+        crownRoundness: workspace.crownRoundness.slice(0, next),
+        hookEnabled: workspace.hookEnabled.slice(0, next),
+        selectedIndex: Math.min(next - 1, workspace.selectedIndex),
+      };
+      const nextPositions = [...workspace.positions];
+      const nextLidAngles = [...workspace.lidAngles];
+      const nextRoundness = [...workspace.crownRoundness];
+      const nextHookEnabled = [...workspace.hookEnabled];
+      while (nextPositions.length < next) {
+        const index = nextPositions.length;
+        const lidAngle = 0, roundness = 72, hasHook = false;
+        const localBounds = localBoundsFor(shape, workspace.dimensions, lidAngle, roundness, hasHook);
+        const obstacles = nextPositions.map((position, obstacleIndex) => worldBounds(
+          localBoundsFor(shape, workspace.dimensions, nextLidAngles[obstacleIndex] ?? 0, nextRoundness[obstacleIndex] ?? 72, nextHookEnabled[obstacleIndex] ?? false),
+          position,
+        ));
+        const baseY = groundEnabled ? groundOffsetFor(shape, workspace.dimensions, lidAngle) : 0;
+        nextPositions.push(spawnBeside(localBounds, obstacles, baseY, 0) as Vec3);
+        nextLidAngles.push(lidAngle);
+        nextRoundness.push(roundness);
+        nextHookEnabled.push(hasHook);
+        if (index >= 11) break;
+      }
+      return { ...workspace, positions: nextPositions, lidAngles: nextLidAngles, crownRoundness: nextRoundness, hookEnabled: nextHookEnabled, selectedIndex: workspace.selectedIndex };
     });
   };
   const changePosition = (axis: 0 | 1 | 2, value: number) => {
-    updateWorkspace(shape, (workspace) => ({ ...workspace, positions: workspace.positions.map((position, index) => index === workspace.selectedIndex ? position.map((item, itemIndex) => itemIndex === axis ? (axis === 1 && groundEnabled ? Math.max(value,groundOffsetFor(shape,workspace.dimensions,workspace.lidAngles[index] ?? 0)) : value) : item) as Vec3 : position) }));
+    updateWorkspace(shape, (workspace) => {
+      const current = workspace.positions[workspace.selectedIndex];
+      const desired = current.map((item, itemIndex) => itemIndex === axis ? value : item) as Vec3;
+      const resolved = collisionSafePosition(shape, workspace, workspace.selectedIndex, desired, groundEnabled);
+      return { ...workspace, positions: workspace.positions.map((position, index) => index === workspace.selectedIndex ? resolved : position) };
+    });
   };
-  const resetSelectedPosition = () => updateWorkspace(shape, (workspace) => ({ ...workspace, positions: workspace.positions.map((position, index) => index === workspace.selectedIndex ? [0, groundEnabled ? groundOffsetFor(shape,workspace.dimensions,workspace.lidAngles[index] ?? 0) : 0, 0] as Vec3 : position) }));
+  const resetSelectedPosition = () => updateWorkspace(shape, (workspace) => {
+    const desired = [0, groundEnabled ? groundOffsetFor(shape,workspace.dimensions,workspace.lidAngles[workspace.selectedIndex] ?? 0) : 0, 0] as Vec3;
+    const resolved = collisionSafePosition(shape, workspace, workspace.selectedIndex, desired, groundEnabled);
+    return { ...workspace, positions: workspace.positions.map((position, index) => index === workspace.selectedIndex ? resolved : position) };
+  });
   const changeSelectedLid = (angle: number) => updateWorkspace(shape, (workspace) => ({
     ...workspace,
     lidAngles: workspace.lidAngles.map((value, index) => index === workspace.selectedIndex ? angle : value),
     positions: workspace.positions.map(([x,y,z], index) => index === workspace.selectedIndex && groundEnabled ? [x, Math.max(y,groundOffsetFor(shape,workspace.dimensions,angle)), z] as Vec3 : [x,y,z] as Vec3),
   }));
-  const changeSelectedRoundness = (roundness: number) => updateWorkspace("garment", (workspace) => ({
+  const changeSelectedRoundness = (roundness: number) => updateWorkspace("garment", (workspace) => separateOverlappingInstances("garment", {
     ...workspace,
     crownRoundness: workspace.crownRoundness.map((value, index) => index === workspace.selectedIndex ? roundness : value),
-  }));
+  }, groundEnabled));
+  const toggleSelectedHook = () => updateWorkspace("garment", (workspace) => separateOverlappingInstances("garment", {
+    ...workspace,
+    hookEnabled: workspace.hookEnabled.map((value, index) => index === workspace.selectedIndex ? !value : value),
+  }, groundEnabled));
   const resetView = () => { setRotation({ yaw: -.62, pitch: -.38 }); setZoom(1); };
   const setView = (view: "front" | "top" | "iso") => {
     if (view === "front") setRotation({ yaw: 0, pitch: 0 });
@@ -451,7 +529,7 @@ export default function ShapeStudio() {
         <div className="viewport-meta"><div><span className="eyebrow">PERSPECTIVE / {focalLength}mm</span><strong>{SHAPES.find((item) => item.id === shape)?.label} × {quantity}</strong></div><div className="view-actions"><Button className="capture-button" size="sm" onClick={saveJpg}><Download size={15}/>{captureStatus ? "已保存" : "拍照 JPG"}</Button><Button variant="ghost" size="sm" onClick={toggleGround} aria-pressed={groundEnabled}>{groundEnabled ? <Minus size={15}/> : <Plus size={15}/>} {groundEnabled ? "移除地面" : "添加地面"}</Button><Button variant="ghost" size="sm" onClick={() => setGridVisible((v) => !v)} aria-pressed={gridVisible}><Grid3X3 size={16} />网格</Button><Button variant="ghost" size="sm" onClick={resetView}><Redo2 size={15} />复位</Button></div></div>
         <div className={`canvas-stage ${captureStatus ? "is-captured" : ""}`}><canvas ref={canvasRef} tabIndex={0} aria-label="1比1画布，点中图形可自由拖动位置，拖动空白旋转视角"
           onPointerDown={(e) => { const rect=e.currentTarget.getBoundingClientRect(); const x=e.clientX-rect.left,y=e.clientY-rect.top; const hit=[...hitRegionsRef.current].sort((a,b)=>a.radius-b.radius).find((region)=>Math.hypot(x-region.x,y-region.y)<=region.radius+10); e.currentTarget.setPointerCapture(e.pointerId); if(hit)selectInstance(hit.index); pointerRef.current = { id:e.pointerId, x:e.clientX, y:e.clientY, action:hit?"object":"camera", objectIndex:hit?.index ?? -1 }; e.currentTarget.classList.add(hit?"is-moving-object":"is-dragging"); }}
-          onPointerMove={(e) => { const p=pointerRef.current; if(!p||p.id!==e.pointerId)return; const dx=e.clientX-p.x,dy=e.clientY-p.y; if(p.action==="camera")setRotation((r)=>({yaw:r.yaw+dx*.009,pitch:Math.max(-1.48,Math.min(1.48,r.pitch+dy*.009))})); else { const canvas=e.currentTarget; const factor=2.45/(Math.max(220,Math.min(canvas.clientWidth,canvas.clientHeight))*zoom); const [wx,wy,wz]=inverseRotate([dx*factor,-dy*factor,0],rotation.yaw,rotation.pitch); updateWorkspace(shape,(workspace)=>({ ...workspace, positions:workspace.positions.map((position,index)=>index===p.objectIndex?[position[0]+wx,groundEnabled?Math.max(position[1]+wy,groundOffsetFor(shape,workspace.dimensions,workspace.lidAngles[index] ?? 0)):position[1]+wy,position[2]+wz] as Vec3:position) })); } pointerRef.current={...p,x:e.clientX,y:e.clientY}; }}
+          onPointerMove={(e) => { const p=pointerRef.current; if(!p||p.id!==e.pointerId)return; const dx=e.clientX-p.x,dy=e.clientY-p.y; if(p.action==="camera")setRotation((r)=>({yaw:r.yaw+dx*.009,pitch:Math.max(-1.48,Math.min(1.48,r.pitch+dy*.009))})); else { const canvas=e.currentTarget; const factor=2.45/(Math.max(220,Math.min(canvas.clientWidth,canvas.clientHeight))*zoom); const [wx,wy,wz]=inverseRotate([dx*factor,-dy*factor,0],rotation.yaw,rotation.pitch); updateWorkspace(shape,(workspace)=>{ const current=workspace.positions[p.objectIndex]; const desired=[current[0]+wx,current[1]+wy,current[2]+wz] as Vec3; const resolved=collisionSafePosition(shape,workspace,p.objectIndex,desired,groundEnabled); return { ...workspace, positions:workspace.positions.map((position,index)=>index===p.objectIndex?resolved:position) }; }); } pointerRef.current={...p,x:e.clientX,y:e.clientY}; }}
           onPointerUp={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object"); }} onPointerCancel={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object"); }} onDoubleClick={resetView}
           onWheel={(e) => { e.preventDefault(); setZoom((z)=>Math.max(Math.min(MIN_ZOOM,zoomLimit * .5),Math.min(zoomLimit,z-e.deltaY*.0015))); }}
           onKeyDown={(e) => { if(e.key==="ArrowLeft")setRotation((r)=>({...r,yaw:r.yaw-.08})); if(e.key==="ArrowRight")setRotation((r)=>({...r,yaw:r.yaw+.08})); if(e.key==="ArrowUp")setRotation((r)=>({...r,pitch:Math.max(-1.48,r.pitch-.08)})); if(e.key==="ArrowDown")setRotation((r)=>({...r,pitch:Math.min(1.48,r.pitch+.08)})); if(e.key==="0")resetView(); }} />
@@ -463,12 +541,12 @@ export default function ShapeStudio() {
       <aside className="control-panel" aria-label="模型与摄像机控制"><div className="panel-title"><span>02</span><div><strong>调整尺寸</strong><small>实时改变比例</small></div></div><div className="controls">
         {isGarment ? <><DimensionControl label="宽度" axis="W" value={Math.round(dimensions.width * 100)} unit="%" onChange={(v)=>changeDimension("width",v / 100)} /><DimensionControl label="底部高度" axis="H" value={Math.round(dimensions.height * 100)} unit="%" minValue={50} onChange={(v)=>changeDimension("height",v / 100)} /><DimensionControl label="厚度" axis="D" value={Math.round(dimensions.depth * 100)} unit="%" onChange={(v)=>changeDimension("depth",v / 100)} /></> : <><DimensionControl label="长度" axis="W" value={dimensions.width} unit="cm" onChange={(v)=>changeDimension("width",v)} /><DimensionControl label="高度" axis="H" value={dimensions.height} unit="cm" onChange={(v)=>changeDimension("height",v)} /><DimensionControl label="深度" axis="D" value={dimensions.depth} unit="cm" onChange={(v)=>changeDimension("depth",v)} /></>}
         <div className="scale-control"><div className="control-heading"><span><Maximize2 size={16}/>整体大小</span><output>{dimensions.scale.toFixed(1)}×</output></div><Slider aria-label="整体大小" min={.5} max={2} step={.1} value={[dimensions.scale]} onValueChange={([next])=>changeDimension("scale",next)} /><div className="slider-ends"><span>0.5×</span><span>2.0×</span></div></div>
-      </div><div className="size-summary"><span>{isGarment ? "宽 × 底部高度 × 厚 · 相对比例" : "当前尺寸"}</span><strong>{dimensionLabel(dimensions.width)} × {dimensionLabel(dimensions.height)} × {dimensionLabel(dimensions.depth)}</strong><small>{isGarment ? "高度只改变底边 · 弧顶与圆环挂钩保持原形" : `单位：厘米 · 比例 ${dimensions.scale.toFixed(1)}×`}</small>{isGarment && <Button variant="secondary" size="sm" onClick={()=>updateWorkspace("garment", (workspace)=>({...workspace, dimensions:{width:1,height:1,depth:1,scale:1}, positions:workspace.positions.map(([x,y,z])=>[x, groundEnabled ? Math.max(y, -.04) : y,z] as Vec3)}))}>恢复初始比例</Button>}</div>
+      </div><div className="size-summary"><span>{isGarment ? "宽 × 底部高度 × 厚 · 相对比例" : "当前尺寸"}</span><strong>{dimensionLabel(dimensions.width)} × {dimensionLabel(dimensions.height)} × {dimensionLabel(dimensions.depth)}</strong><small>{isGarment ? "高度只改变底边 · 弧顶与可选挂钩保持原形" : `单位：厘米 · 比例 ${dimensions.scale.toFixed(1)}×`}</small>{isGarment && <Button variant="secondary" size="sm" onClick={()=>updateWorkspace("garment", (workspace)=>({...workspace, dimensions:{width:1,height:1,depth:1,scale:1}, positions:workspace.positions.map(([x,y,z])=>[x, groundEnabled ? Math.max(y, -.04) : y,z] as Vec3)}))}>恢复初始比例</Button>}</div>
         <section className="editor-section instance-section" aria-label="数量与自由摆放">
           <div className="section-heading"><span><Copy size={16}/>数量与自由摆放</span><output>{quantity} 个</output></div>
           <div className="quantity-stepper"><Button variant="outline" size="icon" aria-label="减少数量" disabled={quantity<=1} onClick={()=>changeQuantity(quantity-1)}><Minus size={14}/></Button><strong>{quantity}</strong><Button variant="outline" size="icon" aria-label="增加数量" disabled={quantity>=12} onClick={()=>changeQuantity(quantity+1)}><Plus size={14}/></Button></div>
           <Slider aria-label="几何图形数量" min={1} max={12} step={1} value={[quantity]} onValueChange={([next])=>changeQuantity(next)} />
-          <p className="free-layout-tip"><Move3D size={14}/>点中画布里的图形并直接拖动，不使用预设排列。</p>
+          <p className="free-layout-tip"><Move3D size={14}/>新增时自动接触摆放；拖动到其他模型表面后停止并可沿表面滑动。</p>
           <div className="instance-picker" aria-label="选择要编辑的形体">{positions.map((_,index)=><Button key={index} size="sm" variant={selectedIndex===index?"default":"outline"} onClick={()=>selectInstance(index)} aria-pressed={selectedIndex===index}>{index+1}</Button>)}</div>
           <div className="position-editor">
             <div className="section-heading"><span><LocateFixed size={15}/>形体 {selectedIndex+1} 坐标</span><Button variant="ghost" size="sm" onClick={resetSelectedPosition}>归零</Button></div>
@@ -482,7 +560,7 @@ export default function ShapeStudio() {
           <div className="lid-angle-range"><span>0% 平顶</span><span>100% 圆弧</span></div>
           <div className="crown-presets"><Button variant="outline" size="sm" onClick={()=>changeSelectedRoundness(0)}>平顶</Button><Button variant="outline" size="sm" onClick={()=>changeSelectedRoundness(50)}>柔弧</Button><Button size="sm" onClick={()=>changeSelectedRoundness(100)}>圆弧</Button></div>
           <div className="component-divider" />
-          <div className="fixed-component"><span><Circle size={15}/>圆环挂钩</span><b>默认 1 个</b><small>固定吸附于弧顶中心，不随底部高度拉伸。</small></div>
+          <div className="hook-toggle"><div><span><Link2 size={15}/>参考图挂钩</span><small>启用后自动吸附于当前形体的弧顶正中。</small></div><Button size="sm" variant={selectedHookEnabled?"default":"outline"} aria-pressed={selectedHookEnabled} onClick={toggleSelectedHook}>{selectedHookEnabled?"已启用":"启用挂钩"}</Button></div>
         </section>}
         <section className="editor-section camera-section" aria-label="透视摄像机">
           <div className="section-heading"><span><Camera size={16}/>透视摄像机</span><output>{focalLength} mm</output></div>
