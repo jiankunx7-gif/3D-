@@ -134,11 +134,12 @@ button, input { font: inherit; }
 .crown-presets { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; }
 .crown-presets button { height: 30px; font-size: 9px; box-shadow: none; }
 .component-divider { height: 1px; margin: 3px 0; background: #f1d8ca; }
-.fixed-component { display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; align-items: center; padding: 11px; border: 1px solid #efd9cd; border-radius: 6px; background: rgba(255,255,255,.68); }
-.fixed-component span { display: flex; align-items: center; gap: 7px; color: #596572; font-size: 10px; font-weight: 700; }
-.fixed-component span svg { color: var(--accent-deep); }
-.fixed-component b { color: var(--accent-deep); font: 700 9px/1 monospace; }
-.fixed-component small { grid-column: 1/-1; color: #917b70; font-size: 8px; line-height: 1.45; }
+.hook-toggle { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 11px; border: 1px solid #efd9cd; border-radius: 6px; background: rgba(255,255,255,.68); }
+.hook-toggle > div { min-width: 0; display: grid; gap: 5px; }
+.hook-toggle span { display: flex; align-items: center; gap: 7px; color: #596572; font-size: 10px; font-weight: 700; }
+.hook-toggle span svg { color: var(--accent-deep); }
+.hook-toggle small { color: #917b70; font-size: 8px; line-height: 1.45; }
+.hook-toggle button { flex: none; min-width: 68px; height: 30px; font-size: 9px; box-shadow: none; }
 .instance-section { padding: 18px; border: 1px solid #dbe1e6; border-radius: 8px; background: rgba(247,249,250,.82); }
 .quantity-stepper { display: grid; grid-template-columns: 32px 1fr 32px; align-items: center; gap: 8px; }
 .quantity-stepper button { width: 32px; height: 30px; padding: 0; color: #65717f; box-shadow: none; }
