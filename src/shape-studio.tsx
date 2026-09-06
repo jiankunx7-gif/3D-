@@ -14,7 +14,7 @@ type Dimensions = { width: number; height: number; depth: number; scale: number 
 type Vec3 = [number, number, number];
 type ProjectionMode = 'cube' | 'uvw';
 type TextureMaterial = { src: string; name: string; size: number; projection: ProjectionMode };
-type Decal = { src: string; name: string; u: number; v: number; size: number };
+type Decal = { src: string; name: string; u: number; v: number; width: number; height: number };
 type ShapeWorkspace = { dimensions: Dimensions; positions: Vec3[]; lidAngles: number[]; crownRoundness: number[]; hookEnabled: boolean[]; hookSizes: number[]; colors: string[]; selectedIndex: number; selectedSurfaceIds: string[]; faceMaterials: Record<string, TextureMaterial>; decals: Record<string, Decal> };
 type SceneFace = { points: Vec3[]; material: "body" | "lid" | "inside" | "trim" | "hook"; surfaceId: string };
 type InstanceFace = SceneFace & { instanceIndex: number; localPoints: Vec3[] };
@@ -286,8 +286,8 @@ function fillProjectedTexture(ctx: CanvasRenderingContext2D, pattern: CanvasPatt
 function fillProjectedDecal(ctx: CanvasRenderingContext2D, image: HTMLImageElement, localPoints: Vec3[], projected: { x: number; y: number }[], decal: Decal, surfaceId: string, bounds: ProjectionBounds) {
   if (localPoints.length < 3 || projected.length < 3 || !image.naturalWidth || !image.naturalHeight) return;
   const uvs = uvwProjectionUvs(localPoints, surfaceId, bounds);
-  const width = Math.max(.05, decal.size);
-  const height = width * image.naturalHeight / image.naturalWidth;
+  const width = Math.max(.05, decal.width);
+  const height = Math.max(.05, decal.height);
   const left = decal.u - width / 2;
   const top = decal.v - height / 2;
   const horizontalCopies = surfaceId.includes('side') || surfaceId.includes('edge') ? [left - 1, left, left + 1] : [left];
@@ -687,15 +687,20 @@ export default function ShapeStudio() {
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result !== 'string') return;
-      updateWorkspace(targetShape, (workspace) => {
-        const nextDecals = { ...workspace.decals };
-        targetSurfaces.forEach((surfaceId) => { nextDecals[faceMaterialKey(targetInstance, surfaceId)] = { src: reader.result as string, name: file.name, u: .5, v: .5, size: .34 }; });
-        return { ...workspace, decals: nextDecals };
-      });
+      const source = reader.result;
+      const applyDecal = (height: number) => updateWorkspace(targetShape, (workspace) => {
+          const nextDecals = { ...workspace.decals };
+          targetSurfaces.forEach((surfaceId) => { nextDecals[faceMaterialKey(targetInstance, surfaceId)] = { src: source, name: file.name, u: .5, v: .5, width: .34, height }; });
+          return { ...workspace, decals: nextDecals };
+        });
+      const preview = new Image();
+      preview.onload = () => applyDecal(Math.max(.05, Math.min(4, .34 * preview.naturalHeight / Math.max(1, preview.naturalWidth))));
+      preview.onerror = () => applyDecal(.34);
+      preview.src = source;
     };
     reader.readAsDataURL(file);
   };
-  const changeSelectedDecal = (field: 'u' | 'v' | 'size', value: number) => {
+  const changeSelectedDecal = (field: 'u' | 'v' | 'width' | 'height', value: number) => {
     if (!selectedSurfaceIds.length) return;
     updateWorkspace(shape, (workspace) => {
       const nextDecals = { ...workspace.decals };
@@ -817,7 +822,7 @@ export default function ShapeStudio() {
             {selectedDecal && <>
               <div className="texture-status decal-status"><span className="status-dot"/><div><strong>贴花已吸附到所选表面</strong><small title={selectedDecal.name}>{selectedDecal.name}</small></div><Button variant="ghost" size="icon" aria-label="移除所选面的透明 PNG 贴花" onClick={removeSelectedDecal}><Trash2 size={14}/></Button></div>
               <div className="decal-controls">
-                {([['u','水平位置',0,100],['v','垂直位置',0,100],['size','贴花大小',5,200]] as const).map(([field,label,min,max])=>{ const current=Math.round(selectedDecal[field]*100); return <div className="decal-control-row" key={field}><div className="control-heading"><span>{label}</span><label className="value-field texture-value-field"><input aria-label={`${label}百分比`} type="number" min={min} max={max} step={1} value={current} onChange={(event)=>changeSelectedDecal(field,decalPercent(Number(event.target.value),min,max))}/><span>%</span></label></div><Slider aria-label={`${label}`} min={min} max={max} step={1} value={[current]} onValueChange={([next])=>changeSelectedDecal(field,next/100)}/></div>; })}
+                {([['u','水平位置',0,100],['v','垂直位置',0,100],['width','贴花宽度',5,400],['height','贴花高度',5,400]] as const).map(([field,label,min,max])=>{ const current=Math.round(selectedDecal[field]*100); return <div className="decal-control-row" key={field}><div className="control-heading"><span>{label}</span><label className="value-field texture-value-field"><input aria-label={`${label}百分比`} type="number" min={min} max={max} step={1} value={current} onChange={(event)=>changeSelectedDecal(field,decalPercent(Number(event.target.value),min,max))}/><span>%</span></label></div><Slider aria-label={`${label}`} min={min} max={max} step={1} value={[current]} onValueChange={([next])=>changeSelectedDecal(field,next/100)}/></div>; })}
               </div>
             </>}
           </>}
