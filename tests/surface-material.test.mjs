@@ -29,8 +29,9 @@ test('model colors normalize and preserve predictable surface shading', () => {
   assert.equal(shadedModelColor('#804020', .5), '#402010');
 });
 
-test('decal values entered as percentages are constrained', () => {
+test('decal position and independent width or height percentages are constrained', () => {
   assert.equal(decalPercent(42), .42);
   assert.equal(decalPercent(-10), 0);
   assert.equal(decalPercent(240, 5, 200), 2);
+  assert.equal(decalPercent(520, 5, 400), 4);
 });
