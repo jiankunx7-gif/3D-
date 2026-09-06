@@ -55,6 +55,7 @@ export function garmentFaces(
   dimensions: { width: number; height: number; depth: number; scale: number },
   roundness = 72,
   hookEnabled = false,
+  hookSize = 1,
 ): Face[] {
   const faces: Face[] = [];
   const segments = 24;
@@ -103,7 +104,7 @@ export function garmentFaces(
   const scaleX = .82 * dimensions.width * dimensions.scale;
   const scaleY = 1.38 * dimensions.scale;
   const scaleZ = .34 * dimensions.depth * dimensions.scale;
-  const hookScale = .82 * dimensions.scale;
+  const hookScale = .82 * dimensions.scale * Math.max(.5, Math.min(2, hookSize));
   const hookAnchorY = garmentHookAnchor(roundness)[1];
   return faces.map(({ material, points }) => ({
     material,
