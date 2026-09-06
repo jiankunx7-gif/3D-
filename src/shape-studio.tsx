@@ -6,13 +6,14 @@ import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { garmentFaces } from './garment-model';
 import { boundsOverlap, resolveCollisionMove, spawnBeside, worldBounds, type CollisionBounds } from './collision';
-import { affineTriangleMap, cubeProjectionUvs, textureWorldPeriod } from './texture-projection';
-import { textureSizeFromPercent, updateSurfaceSelection } from './surface-material';
+import { affineTriangleMap, cubeProjectionUvs, textureWorldPeriod, uvwProjectionUvs, type ProjectionBounds } from './texture-projection';
+import { cloneInstanceMaterials, textureSizeFromPercent, updateSurfaceSelection } from './surface-material';
 
 type ShapeType = "box" | "cylinder" | "garment";
 type Dimensions = { width: number; height: number; depth: number; scale: number };
 type Vec3 = [number, number, number];
-type TextureMaterial = { src: string; name: string; size: number };
+type ProjectionMode = 'cube' | 'uvw';
+type TextureMaterial = { src: string; name: string; size: number; projection: ProjectionMode };
 type ShapeWorkspace = { dimensions: Dimensions; positions: Vec3[]; lidAngles: number[]; crownRoundness: number[]; hookEnabled: boolean[]; hookSizes: number[]; selectedIndex: number; selectedSurfaceIds: string[]; faceMaterials: Record<string, TextureMaterial> };
 type SceneFace = { points: Vec3[]; material: "body" | "lid" | "inside" | "trim" | "hook"; surfaceId: string };
 type InstanceFace = SceneFace & { instanceIndex: number; localPoints: Vec3[] };
@@ -262,10 +263,11 @@ function pointInPolygon(x: number, y: number, polygon: { x: number; y: number }[
   return inside;
 }
 
-function fillProjectedTexture(ctx: CanvasRenderingContext2D, pattern: CanvasPattern, image: HTMLImageElement, localPoints: Vec3[], projected: { x: number; y: number }[], size: number) {
+function fillProjectedTexture(ctx: CanvasRenderingContext2D, pattern: CanvasPattern, image: HTMLImageElement, localPoints: Vec3[], projected: { x: number; y: number }[], material: TextureMaterial, surfaceId: string, bounds: ProjectionBounds) {
   if (localPoints.length < 3 || projected.length < 3) return;
-  const period = textureWorldPeriod(size);
-  const uvs = cubeProjectionUvs(localPoints).map(([u,v]) => [u / period * image.naturalWidth, v / period * image.naturalHeight] as [number,number]);
+  const uvs = material.projection === 'uvw'
+    ? uvwProjectionUvs(localPoints, surfaceId, bounds).map(([u,v]) => [u / material.size * image.naturalWidth, v / material.size * image.naturalHeight] as [number,number])
+    : cubeProjectionUvs(localPoints).map(([u,v]) => { const period=textureWorldPeriod(material.size); return [u / period * image.naturalWidth, v / period * image.naturalHeight] as [number,number]; });
   for (let index = 1; index < localPoints.length - 1; index++) {
     const source = [uvs[0], uvs[index], uvs[index + 1]] as [[number,number],[number,number],[number,number]];
     const target = [[projected[0].x, projected[0].y], [projected[index].x, projected[index].y], [projected[index + 1].x, projected[index + 1].y]] as [[number,number],[number,number],[number,number]];
@@ -337,6 +339,12 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
       }
       const light: Vec3 = [-0.35, 0.8, 0.55];
       const instanceProjected: { x: number; y: number }[][] = Array.from({ length: positions.length }, () => []);
+      const localBoundsByInstance = scene.reduce((bounds, face) => {
+        const current = bounds[face.instanceIndex] ?? { min:[Infinity,Infinity,Infinity] as Vec3, max:[-Infinity,-Infinity,-Infinity] as Vec3 };
+        face.localPoints.forEach((point) => point.forEach((value, axis) => { current.min[axis] = Math.min(current.min[axis], value); current.max[axis] = Math.max(current.max[axis], value); }));
+        bounds[face.instanceIndex] = current;
+        return bounds;
+      }, [] as ProjectionBounds[]);
       const visibleFaces = scene.map(({ points, localPoints, material, instanceIndex, surfaceId }) => {
         const transformed = points.map((point) => rotate(point, rotation.yaw, rotation.pitch));
         const projected = transformed.map(project);
@@ -363,7 +371,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
             const pattern = ctx.createPattern(image, 'repeat');
             if (pattern) { cached = { image, pattern }; patternCache.set(assignedMaterial.src, cached); }
           }
-          if (cached) fillProjectedTexture(ctx, cached.pattern, cached.image, localPoints, projected, assignedMaterial.size);
+          if (cached) fillProjectedTexture(ctx, cached.pattern, cached.image, localPoints, projected, assignedMaterial, surfaceId, localBoundsByInstance[instanceIndex]);
           ctx.beginPath();
           projected.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
           ctx.closePath();
@@ -454,6 +462,7 @@ export default function ShapeStudio() {
   const [focalLength, setFocalLength] = useState(35);
   const [captureStatus, setCaptureStatus] = useState(false);
   const [materialPickerEnabled, setMaterialPickerEnabled] = useState(false);
+  const [newMaterialProjection, setNewMaterialProjection] = useState<ProjectionMode>('cube');
   const { dimensions, positions, lidAngles, crownRoundness, hookEnabled, hookSizes, selectedIndex, selectedSurfaceIds, faceMaterials } = workspaces[shape];
   const quantity = positions.length;
   const dimensionLabel = (value: number) => isGarment ? `${Math.round(value * 100)}%` : `${value.toFixed(1)} cm`;
@@ -463,6 +472,7 @@ export default function ShapeStudio() {
   const selectedHookSize = hookSizes[selectedIndex] ?? 1;
   const primarySurfaceId = selectedSurfaceIds[0] ?? null;
   const selectedFaceMaterial = primarySurfaceId ? faceMaterials[faceMaterialKey(selectedIndex, primarySurfaceId)] ?? null : null;
+  const selectedProjection = selectedFaceMaterial?.projection ?? newMaterialProjection;
   const groundMinY = groundOffsetFor(shape, dimensions, selectedLidAngle);
   useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, hookEnabled, hookSizes, positions, selectedIndex, selectedSurfaceIds, faceMaterials, materialPickerEnabled);
   useEffect(() => {
@@ -525,9 +535,14 @@ export default function ShapeStudio() {
       const nextRoundness = [...workspace.crownRoundness];
       const nextHookEnabled = [...workspace.hookEnabled];
       const nextHookSizes = [...workspace.hookSizes];
+      const templateIndex = workspace.selectedIndex;
+      let nextFaceMaterials = { ...workspace.faceMaterials };
       while (nextPositions.length < next) {
         const index = nextPositions.length;
-        const lidAngle = 0, roundness = 72, hasHook = false, hookSize = 1;
+        const lidAngle = workspace.lidAngles[templateIndex] ?? 0;
+        const roundness = workspace.crownRoundness[templateIndex] ?? 72;
+        const hasHook = workspace.hookEnabled[templateIndex] ?? false;
+        const hookSize = workspace.hookSizes[templateIndex] ?? 1;
         const localBounds = localBoundsFor(shape, workspace.dimensions, lidAngle, roundness, hasHook, hookSize);
         const obstacles = nextPositions.map((position, obstacleIndex) => worldBounds(
           localBoundsFor(shape, workspace.dimensions, nextLidAngles[obstacleIndex] ?? 0, nextRoundness[obstacleIndex] ?? 72, nextHookEnabled[obstacleIndex] ?? false, nextHookSizes[obstacleIndex] ?? 1),
@@ -539,9 +554,10 @@ export default function ShapeStudio() {
         nextRoundness.push(roundness);
         nextHookEnabled.push(hasHook);
         nextHookSizes.push(hookSize);
+        nextFaceMaterials = cloneInstanceMaterials(nextFaceMaterials, templateIndex, index);
         if (index >= 11) break;
       }
-      return { ...workspace, positions: nextPositions, lidAngles: nextLidAngles, crownRoundness: nextRoundness, hookEnabled: nextHookEnabled, hookSizes: nextHookSizes, selectedIndex: workspace.selectedIndex };
+      return { ...workspace, positions: nextPositions, lidAngles: nextLidAngles, crownRoundness: nextRoundness, hookEnabled: nextHookEnabled, hookSizes: nextHookSizes, faceMaterials: nextFaceMaterials, selectedIndex: workspace.selectedIndex };
     });
   };
   const changePosition = (axis: 0 | 1 | 2, value: number) => {
@@ -576,13 +592,13 @@ export default function ShapeStudio() {
   }, groundEnabled));
   const uploadSelectedFaceTexture = (file: File | undefined) => {
     if (!file || !selectedSurfaceIds.length) return;
-    const targetShape = shape, targetInstance = selectedIndex, targetSurfaces = [...selectedSurfaceIds];
+    const targetShape = shape, targetInstance = selectedIndex, targetSurfaces = [...selectedSurfaceIds], targetProjection = selectedProjection;
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result !== 'string') return;
       updateWorkspace(targetShape, (workspace) => {
         const faceMaterials = { ...workspace.faceMaterials };
-        targetSurfaces.forEach((surfaceId) => { faceMaterials[faceMaterialKey(targetInstance, surfaceId)] = { src: reader.result as string, name: file.name, size: 1 }; });
+        targetSurfaces.forEach((surfaceId) => { faceMaterials[faceMaterialKey(targetInstance, surfaceId)] = { src: reader.result as string, name: file.name, size: 1, projection: targetProjection }; });
         return { ...workspace, faceMaterials };
       });
     };
@@ -595,6 +611,18 @@ export default function ShapeStudio() {
       selectedSurfaceIds.forEach((surfaceId) => {
         const key = faceMaterialKey(selectedIndex, surfaceId);
         if (faceMaterials[key]) faceMaterials[key] = { ...faceMaterials[key], size };
+      });
+      return { ...workspace, faceMaterials };
+    });
+  };
+  const changeSelectedProjection = (projection: ProjectionMode) => {
+    setNewMaterialProjection(projection);
+    if (!selectedSurfaceIds.length) return;
+    updateWorkspace(shape, (workspace) => {
+      const faceMaterials = { ...workspace.faceMaterials };
+      selectedSurfaceIds.forEach((surfaceId) => {
+        const key = faceMaterialKey(selectedIndex, surfaceId);
+        if (faceMaterials[key]) faceMaterials[key] = { ...faceMaterials[key], projection };
       });
       return { ...workspace, faceMaterials };
     });
@@ -681,7 +709,7 @@ export default function ShapeStudio() {
           <div className="section-heading"><span><Copy size={16}/>数量与自由摆放</span><output>{quantity} 个</output></div>
           <div className="quantity-stepper"><Button variant="outline" size="icon" aria-label="减少数量" disabled={quantity<=1} onClick={()=>changeQuantity(quantity-1)}><Minus size={14}/></Button><strong>{quantity}</strong><Button variant="outline" size="icon" aria-label="增加数量" disabled={quantity>=12} onClick={()=>changeQuantity(quantity+1)}><Plus size={14}/></Button></div>
           <Slider aria-label="几何图形数量" min={1} max={12} step={1} value={[quantity]} onValueChange={([next])=>changeQuantity(next)} />
-          <p className="free-layout-tip"><Move3D size={14}/>新增时自动接触摆放；拖动到其他模型表面后停止并可沿表面滑动。</p>
+          <p className="free-layout-tip"><Move3D size={14}/>新增时复制当前形体的材质、投射和组件状态，并自动接触摆放。</p>
           <div className="instance-picker" aria-label="选择要编辑的形体">{positions.map((_,index)=><Button key={index} size="sm" variant={selectedIndex===index?"default":"outline"} onClick={()=>selectInstance(index)} aria-pressed={selectedIndex===index}>{index+1}</Button>)}</div>
           <div className="position-editor">
             <div className="section-heading"><span><LocateFixed size={15}/>形体 {selectedIndex+1} 坐标</span><Button variant="ghost" size="sm" onClick={resetSelectedPosition}>归零</Button></div>
@@ -694,13 +722,14 @@ export default function ShapeStudio() {
           <Button className="material-mode-button" variant={materialPickerEnabled?"default":"outline"} aria-pressed={materialPickerEnabled} onClick={()=>setMaterialPickerEnabled((enabled)=>!enabled)}><MousePointer2 size={15}/>{materialPickerEnabled?"正在选面 · 点击表面":"启用选面"}</Button>
           {!selectedSurfaceIds.length ? <div className="material-empty">请先启用选面，并点击需要添加材质的表面</div> : <>
             <div className="selected-surface-list">{selectedSurfaceIds.map((surfaceId)=><span key={surfaceId}>{surfaceLabel(shape,surfaceId)}</span>)}</div>
+            <div className="projection-switch" aria-label="材质投射方式"><span>投射方式</span><div><Button size="sm" variant={selectedProjection==='cube'?"default":"outline"} aria-pressed={selectedProjection==='cube'} onClick={()=>changeSelectedProjection('cube')}>立方体</Button><Button size="sm" variant={selectedProjection==='uvw'?"default":"outline"} aria-pressed={selectedProjection==='uvw'} onClick={()=>changeSelectedProjection('uvw')}>UVW</Button></div></div>
             <label className="texture-upload"><Upload size={15}/><span>{selectedSurfaceIds.length > 1 ? `应用贴图到 ${selectedSurfaceIds.length} 个面` : selectedFaceMaterial?"更换无缝贴图":"上传无缝贴图"}</span><input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event)=>{ uploadSelectedFaceTexture(event.currentTarget.files?.[0]); event.currentTarget.value=''; }} /></label>
             {selectedFaceMaterial && <>
-              <div className="texture-status"><span className="status-dot"/><div><strong>立方体投射已启用</strong><small title={selectedFaceMaterial.name}>{selectedFaceMaterial.name}</small></div><Button variant="ghost" size="icon" aria-label="移除所选面的材质" onClick={removeSelectedFaceTexture}><Trash2 size={14}/></Button></div>
+              <div className="texture-status"><span className="status-dot"/><div><strong>{selectedProjection==='cube'?"立方体投射":"UVW 贴图投射"}已启用</strong><small title={selectedFaceMaterial.name}>{selectedFaceMaterial.name}</small></div><Button variant="ghost" size="icon" aria-label="移除所选面的材质" onClick={removeSelectedFaceTexture}><Trash2 size={14}/></Button></div>
               <div className="texture-size-control"><div className="control-heading"><span><Maximize2 size={15}/>贴图大小</span><label className="value-field texture-value-field"><input aria-label="输入贴图大小百分比" type="number" min={25} max={400} step={1} value={Math.round(selectedFaceMaterial.size * 100)} onChange={(event)=>changeSelectedTextureSize(textureSizeFromPercent(Number(event.target.value)))} /><span>%</span></label></div><Slider aria-label={`形体 ${selectedIndex+1} 所选表面贴图大小`} min={25} max={400} step={1} value={[Math.round(selectedFaceMaterial.size * 100)]} onValueChange={([next])=>changeSelectedTextureSize(next / 100)} /><div className="slider-ends"><span>25% · 更多重复</span><span>400% · 更大纹理</span></div></div>
             </>}
           </>}
-          <div className="projection-note"><Grid3X3 size={14}/><span>立方体投射会依据表面方向自动选择 X / Y / Z 轴，无缝贴图可连续包裹模型。</span></div>
+          <div className="projection-note"><Grid3X3 size={14}/><span>{selectedProjection==='cube'?"立方体投射依据 X / Y / Z 方向保持纹理尺寸。":"UVW 按模型坐标展开，圆柱侧面会连续环绕。"}</span></div>
         </section>
         {isGarment && <section className="editor-section garment-section" aria-label="西服套弧顶与挂钩">
           <div className="section-heading"><span><Circle size={16}/>形体 {selectedIndex+1} 顶部弧度</span><output>{Math.round(selectedRoundness)}%</output></div>
