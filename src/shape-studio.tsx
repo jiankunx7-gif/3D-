@@ -7,17 +7,17 @@ import { Slider } from "@/components/ui/slider";
 import { garmentFaces } from './garment-model';
 import { boundsOverlap, resolveCollisionMove, spawnBeside, worldBounds, type CollisionBounds } from './collision';
 import { affineTriangleMap, cubeProjectionUvs, textureWorldPeriod } from './texture-projection';
+import { textureSizeFromPercent, updateSurfaceSelection } from './surface-material';
 
 type ShapeType = "box" | "cylinder" | "garment";
 type Dimensions = { width: number; height: number; depth: number; scale: number };
 type Vec3 = [number, number, number];
 type TextureMaterial = { src: string; name: string; size: number };
-type ShapeWorkspace = { dimensions: Dimensions; positions: Vec3[]; lidAngles: number[]; crownRoundness: number[]; hookEnabled: boolean[]; hookSizes: number[]; selectedIndex: number; selectedFaceIndex: number | null; faceMaterials: Record<string, TextureMaterial> };
-type Mesh = { vertices: Vec3[]; faces: number[][] };
-type SceneFace = { points: Vec3[]; material: "body" | "lid" | "inside" | "trim" | "hook" };
-type InstanceFace = SceneFace & { instanceIndex: number; faceIndex: number; localPoints: Vec3[] };
+type ShapeWorkspace = { dimensions: Dimensions; positions: Vec3[]; lidAngles: number[]; crownRoundness: number[]; hookEnabled: boolean[]; hookSizes: number[]; selectedIndex: number; selectedSurfaceIds: string[]; faceMaterials: Record<string, TextureMaterial> };
+type SceneFace = { points: Vec3[]; material: "body" | "lid" | "inside" | "trim" | "hook"; surfaceId: string };
+type InstanceFace = SceneFace & { instanceIndex: number; localPoints: Vec3[] };
 type HitRegion = { index: number; x: number; y: number; radius: number };
-type FaceHitRegion = { instanceIndex: number; faceIndex: number; polygon: { x: number; y: number }[] };
+type FaceHitRegion = { instanceIndex: number; surfaceId: string; polygon: { x: number; y: number }[] };
 const GROUND_Y = -0.64;
 const MIN_ZOOM = 0.62;
 const MAX_ZOOM_SEARCH = 6;
@@ -29,95 +29,98 @@ const SHAPES = [
   { id: "garment" as const, label: "西服套", icon: Shirt },
 ];
 
-function boxMesh(): Mesh {
-  return {
-    vertices: [
-      [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5],
-      [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5],
-    ],
-    faces: [[0, 3, 2, 1], [4, 5, 6, 7], [0, 4, 7, 3], [1, 2, 6, 5], [3, 7, 6, 2], [0, 1, 5, 4]],
-  };
-}
-
-function cylinderMesh(): Mesh {
-  const vertices: Vec3[] = [];
-  const faces: number[][] = [];
-  const segments = 28;
-  for (let i = 0; i < segments; i++) {
-    const angle = (i / segments) * Math.PI * 2;
-    vertices.push([Math.cos(angle) * 0.5, -0.5, Math.sin(angle) * 0.5]);
-  }
-  for (let i = 0; i < segments; i++) {
-    const angle = (i / segments) * Math.PI * 2;
-    vertices.push([Math.cos(angle) * 0.5, 0.5, Math.sin(angle) * 0.5]);
-  }
-  for (let i = 0; i < segments; i++) {
-    const next = (i + 1) % segments;
-    faces.push([i, next, segments + next, segments + i]);
-  }
-  faces.push(Array.from({ length: segments }, (_, i) => segments - 1 - i));
-  faces.push(Array.from({ length: segments }, (_, i) => segments + i));
-  return { vertices, faces };
-}
-
-function meshFor(shape: ShapeType) { return shape === "box" ? boxMesh() : cylinderMesh(); }
-
 function hingeRotate([x, y, z]: Vec3, hingeY: number, hingeZ: number, angle: number): Vec3 {
   const dy = y - hingeY, dz = z - hingeZ;
   const c = Math.cos(-angle), s = Math.sin(-angle);
   return [x, hingeY + dy * c - dz * s, hingeZ + dy * s + dz * c];
 }
 
+function garmentSurfaceId(faceIndex: number) {
+  if (faceIndex === 0) return 'back';
+  if (faceIndex === 1) return 'front';
+  if (faceIndex <= 28) return 'front-trim';
+  if (faceIndex <= 55) return 'side';
+  if (faceIndex <= 82) return 'back-trim';
+  return 'hook';
+}
+
 function sceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle: number, roundness = 72, hookEnabled = false, hookSize = 1): SceneFace[] {
-  if (shape === 'garment') return garmentFaces(dimensions, roundness, hookEnabled, hookSize);
+  if (shape === 'garment') return garmentFaces(dimensions, roundness, hookEnabled, hookSize).map((face, faceIndex) => ({ ...face, surfaceId: garmentSurfaceId(faceIndex) }));
   const width = dimensions.width * dimensions.scale;
   const height = dimensions.height * dimensions.scale;
   const depth = dimensions.depth * dimensions.scale;
-  const mesh = meshFor(shape);
-  const topFaceIndex = shape === "box" ? 4 : mesh.faces.length - 1;
-  const faces: SceneFace[] = mesh.faces
-    .filter((_, index) => index !== topFaceIndex)
-    .map((face) => ({
-      material: "body" as const,
-      points: face.map((index) => {
-        const [x, y, z] = mesh.vertices[index];
-        return [x * width, y * height, z * depth] as Vec3;
-      }),
-    }));
-
-  const insideY = height / 2 - Math.max(0.018, height * 0.012);
-  const thickness = Math.max(0.055, Math.min(width, depth) * 0.035);
+  const thickness = Math.min(Math.max(.025, Math.min(width, depth) * .045), width * .22, depth * .22, height * .22);
   const angle = (lidAngle * Math.PI) / 180;
   const hingeY = height / 2;
   const hingeZ = -depth / 2;
+  const bottomY = -height / 2;
+  const faces: SceneFace[] = [];
 
   if (shape === "box") {
-    faces.push({
-      material: "inside",
-      points: [[-width/2, insideY, -depth/2], [-width/2, insideY, depth/2], [width/2, insideY, depth/2], [width/2, insideY, -depth/2]],
-    });
+    const x0 = -width/2, x1 = width/2, z0 = -depth/2, z1 = depth/2;
+    const ix0 = x0 + thickness, ix1 = x1 - thickness, iz0 = z0 + thickness, iz1 = z1 - thickness;
+    const innerBottomY = bottomY + thickness;
+    faces.push(
+      { material:'body', surfaceId:'outer-back', points:[[x0,bottomY,z0],[x0,hingeY,z0],[x1,hingeY,z0],[x1,bottomY,z0]] },
+      { material:'body', surfaceId:'outer-front', points:[[x0,bottomY,z1],[x1,bottomY,z1],[x1,hingeY,z1],[x0,hingeY,z1]] },
+      { material:'body', surfaceId:'outer-left', points:[[x0,bottomY,z0],[x0,bottomY,z1],[x0,hingeY,z1],[x0,hingeY,z0]] },
+      { material:'body', surfaceId:'outer-right', points:[[x1,bottomY,z0],[x1,hingeY,z0],[x1,hingeY,z1],[x1,bottomY,z1]] },
+      { material:'body', surfaceId:'outer-bottom', points:[[x0,bottomY,z0],[x1,bottomY,z0],[x1,bottomY,z1],[x0,bottomY,z1]] },
+      { material:'trim', surfaceId:'rim', points:[[x0,hingeY,z0],[x1,hingeY,z0],[ix1,hingeY,iz0],[ix0,hingeY,iz0]] },
+      { material:'trim', surfaceId:'rim', points:[[x0,hingeY,z1],[ix0,hingeY,iz1],[ix1,hingeY,iz1],[x1,hingeY,z1]] },
+      { material:'trim', surfaceId:'rim', points:[[x0,hingeY,z0],[ix0,hingeY,iz0],[ix0,hingeY,iz1],[x0,hingeY,z1]] },
+      { material:'trim', surfaceId:'rim', points:[[x1,hingeY,z0],[x1,hingeY,z1],[ix1,hingeY,iz1],[ix1,hingeY,iz0]] },
+      { material:'inside', surfaceId:'inside-back', points:[[ix0,innerBottomY,iz0],[ix1,innerBottomY,iz0],[ix1,hingeY,iz0],[ix0,hingeY,iz0]] },
+      { material:'inside', surfaceId:'inside-front', points:[[ix0,innerBottomY,iz1],[ix0,hingeY,iz1],[ix1,hingeY,iz1],[ix1,innerBottomY,iz1]] },
+      { material:'inside', surfaceId:'inside-left', points:[[ix0,innerBottomY,iz0],[ix0,hingeY,iz0],[ix0,hingeY,iz1],[ix0,innerBottomY,iz1]] },
+      { material:'inside', surfaceId:'inside-right', points:[[ix1,innerBottomY,iz0],[ix1,innerBottomY,iz1],[ix1,hingeY,iz1],[ix1,hingeY,iz0]] },
+      { material:'inside', surfaceId:'inside-bottom', points:[[ix0,innerBottomY,iz0],[ix0,innerBottomY,iz1],[ix1,innerBottomY,iz1],[ix1,innerBottomY,iz0]] },
+    );
     const lidVertices: Vec3[] = [
       [-width/2, hingeY, -depth/2], [width/2, hingeY, -depth/2], [width/2, hingeY, depth/2], [-width/2, hingeY, depth/2],
       [-width/2, hingeY + thickness, -depth/2], [width/2, hingeY + thickness, -depth/2], [width/2, hingeY + thickness, depth/2], [-width/2, hingeY + thickness, depth/2],
     ].map((point) => hingeRotate(point as Vec3, hingeY, hingeZ, angle));
-    [[0,3,2,1], [4,5,6,7], [0,1,5,4], [3,7,6,2], [0,4,7,3], [1,2,6,5]].forEach((face) => {
-      faces.push({ material: "lid", points: face.map((index) => lidVertices[index]) });
+    const lidFaces = [
+      { indices:[0,3,2,1], surfaceId:'lid-inner' }, { indices:[4,5,6,7], surfaceId:'lid-outer' },
+      { indices:[0,1,5,4], surfaceId:'lid-back-edge' }, { indices:[3,7,6,2], surfaceId:'lid-front-edge' },
+      { indices:[0,4,7,3], surfaceId:'lid-left-edge' }, { indices:[1,2,6,5], surfaceId:'lid-right-edge' },
+    ];
+    lidFaces.forEach(({ indices, surfaceId }) => {
+      faces.push({ material: "lid", surfaceId, points: indices.map((index) => lidVertices[index]) });
     });
   } else {
     const segments = 28;
-    const inside = Array.from({ length: segments }, (_, i) => {
+    const outerBottom = Array.from({ length: segments }, (_, i) => {
       const theta = (i / segments) * Math.PI * 2;
-      return [Math.cos(theta) * width/2, insideY, Math.sin(theta) * depth/2] as Vec3;
+      return [Math.cos(theta) * width/2, bottomY, Math.sin(theta) * depth/2] as Vec3;
     });
-    faces.push({ material: "inside", points: inside });
-    const lower = inside.map(([x,,z]) => hingeRotate([x, hingeY, z], hingeY, hingeZ, angle));
-    const upper = inside.map(([x,,z]) => hingeRotate([x, hingeY + thickness, z], hingeY, hingeZ, angle));
+    const outerTop = outerBottom.map(([x,,z]) => [x,hingeY,z] as Vec3);
+    const innerBottomY = bottomY + thickness;
+    const innerTop = Array.from({ length: segments }, (_, i) => {
+      const theta = (i / segments) * Math.PI * 2;
+      return [Math.cos(theta) * Math.max(.02,width/2-thickness), hingeY, Math.sin(theta) * Math.max(.02,depth/2-thickness)] as Vec3;
+    });
+    const innerBottom = innerTop.map(([x,,z]) => [x,innerBottomY,z] as Vec3);
     for (let i = 0; i < segments; i++) {
       const next = (i + 1) % segments;
-      faces.push({ material: "lid", points: [lower[i], lower[next], upper[next], upper[i]] });
+      faces.push(
+        { material:'body', surfaceId:'outer-side', points:[outerBottom[i],outerBottom[next],outerTop[next],outerTop[i]] },
+        { material:'trim', surfaceId:'rim', points:[outerTop[i],outerTop[next],innerTop[next],innerTop[i]] },
+        { material:'inside', surfaceId:'inside-side', points:[innerBottom[i],innerTop[i],innerTop[next],innerBottom[next]] },
+      );
     }
-    faces.push({ material: "lid", points: [...lower].reverse() });
-    faces.push({ material: "lid", points: upper });
+    faces.push(
+      { material:'body', surfaceId:'outer-bottom', points:[...outerBottom].reverse() },
+      { material:'inside', surfaceId:'inside-bottom', points:innerBottom },
+    );
+    const lower = outerTop.map((point) => hingeRotate(point, hingeY, hingeZ, angle));
+    const upper = outerTop.map(([x,,z]) => hingeRotate([x, hingeY + thickness, z], hingeY, hingeZ, angle));
+    for (let i = 0; i < segments; i++) {
+      const next = (i + 1) % segments;
+      faces.push({ material: "lid", surfaceId:'lid-edge', points: [lower[i], lower[next], upper[next], upper[i]] });
+    }
+    faces.push({ material: "lid", surfaceId:'lid-inner', points: [...lower].reverse() });
+    faces.push({ material: "lid", surfaceId:'lid-outer', points: upper });
   }
   return faces;
 }
@@ -125,10 +128,10 @@ function sceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle: number, 
 function positionedSceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngles: number[], crownRoundness: number[], hookEnabled: boolean[], hookSizes: number[], positions: Vec3[]): InstanceFace[] {
   const fit = shape === 'garment' ? 1 : Math.max(dimensions.width * dimensions.scale, dimensions.height * dimensions.scale, dimensions.depth * dimensions.scale, .1);
   return positions.flatMap(([offsetX, offsetY, offsetZ], instanceIndex) =>
-    sceneFaces(shape, dimensions, lidAngles[instanceIndex] ?? 0, crownRoundness[instanceIndex] ?? 72, hookEnabled[instanceIndex] ?? false, hookSizes[instanceIndex] ?? 1).map(({ points, material }, faceIndex) => ({
+    sceneFaces(shape, dimensions, lidAngles[instanceIndex] ?? 0, crownRoundness[instanceIndex] ?? 72, hookEnabled[instanceIndex] ?? false, hookSizes[instanceIndex] ?? 1).map(({ points, material, surfaceId }) => ({
       material,
+      surfaceId,
       instanceIndex,
-      faceIndex,
       localPoints: points.map(([x,y,z]) => [x / fit, y / fit, z / fit] as Vec3),
       points: points.map(([x,y,z]) => [x / fit + offsetX, y / fit + offsetY, z / fit + offsetZ] as Vec3),
     }))
@@ -223,22 +226,17 @@ function calculateZoomLimit(shape: ShapeType, dimensions: Dimensions, rotation: 
 }
 
 const textureImages = new Map<string, HTMLImageElement>();
-const faceMaterialKey = (instanceIndex: number, faceIndex: number) => `${instanceIndex}:${faceIndex}`;
-function materialSurfaceIndex(shape: ShapeType, faceIndex: number) {
-  if (shape === 'cylinder' && faceIndex >= 0 && faceIndex <= 27) return 0;
-  if (shape === 'cylinder' && faceIndex >= 30 && faceIndex <= 57) return 30;
-  if (shape === 'garment' && faceIndex >= 2 && faceIndex <= 28) return 2;
-  if (shape === 'garment' && faceIndex >= 29 && faceIndex <= 55) return 29;
-  if (shape === 'garment' && faceIndex >= 56 && faceIndex <= 82) return 56;
-  if (shape === 'garment' && faceIndex >= 83) return 83;
-  return faceIndex;
-}
-
-function surfaceLabel(shape: ShapeType, faceIndex: number | null) {
-  if (faceIndex === null) return '未选面';
-  if (shape === 'cylinder') return ({ 0:'圆柱侧面', 28:'底面', 29:'内部顶面', 30:'盖面侧边', 58:'盖面底面', 59:'盖面顶面' } as Record<number,string>)[faceIndex] ?? `面 ${faceIndex + 1}`;
-  if (shape === 'garment') return ({ 0:'背面', 1:'正面', 2:'前侧包边', 29:'侧围', 56:'后侧包边', 83:'挂钩表面' } as Record<number,string>)[faceIndex] ?? `面 ${faceIndex + 1}`;
-  return `面 ${faceIndex + 1}`;
+const faceMaterialKey = (instanceIndex: number, surfaceId: string) => `${instanceIndex}:${surfaceId}`;
+function surfaceLabel(shape: ShapeType, surfaceId: string | null) {
+  if (!surfaceId) return '未选面';
+  const common: Record<string,string> = {
+    'outer-back':'外侧后面', 'outer-front':'外侧正面', 'outer-left':'外侧左面', 'outer-right':'外侧右面', 'outer-bottom':'外侧底面',
+    'inside-back':'内壁后面', 'inside-front':'内壁正面', 'inside-left':'内壁左面', 'inside-right':'内壁右面', 'inside-side':'内部侧壁', 'inside-bottom':'内部底面',
+    rim:'开口包边', 'outer-side':'圆柱侧面', 'lid-inner':'盖面内侧', 'lid-outer':'盖面外侧', 'lid-edge':'盖面侧边',
+    'lid-back-edge':'盖面后边', 'lid-front-edge':'盖面前边', 'lid-left-edge':'盖面左边', 'lid-right-edge':'盖面右边',
+    back:'背面', front:'正面', 'front-trim':'前侧包边', side:'侧围', 'back-trim':'后侧包边', hook:'挂钩表面',
+  };
+  return common[surfaceId] ?? (shape === 'cylinder' ? '圆柱表面' : '模型表面');
 }
 
 function textureImage(src: string, onLoad: () => void) {
@@ -282,7 +280,7 @@ function fillProjectedTexture(ctx: CanvasRenderingContext2D, pattern: CanvasPatt
   }
 }
 
-function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, faceRegionsRef: React.MutableRefObject<FaceHitRegion[]>, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, shape: ShapeType, dimensions: Dimensions, rotation: { yaw: number; pitch: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, lidAngles: number[], crownRoundness: number[], hookEnabled: boolean[], hookSizes: number[], positions: Vec3[], selectedIndex: number, selectedFaceIndex: number | null, faceMaterials: Record<string, TextureMaterial>, materialPickerEnabled: boolean) {
+function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, faceRegionsRef: React.MutableRefObject<FaceHitRegion[]>, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, shape: ShapeType, dimensions: Dimensions, rotation: { yaw: number; pitch: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, lidAngles: number[], crownRoundness: number[], hookEnabled: boolean[], hookSizes: number[], positions: Vec3[], selectedIndex: number, selectedSurfaceIds: string[], faceMaterials: Record<string, TextureMaterial>, materialPickerEnabled: boolean) {
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = canvas?.parentElement;
@@ -339,7 +337,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
       }
       const light: Vec3 = [-0.35, 0.8, 0.55];
       const instanceProjected: { x: number; y: number }[][] = Array.from({ length: positions.length }, () => []);
-      const visibleFaces = scene.map(({ points, localPoints, material, instanceIndex, faceIndex }) => {
+      const visibleFaces = scene.map(({ points, localPoints, material, instanceIndex, surfaceId }) => {
         const transformed = points.map((point) => rotate(point, rotation.yaw, rotation.pitch));
         const projected = transformed.map(project);
         instanceProjected[instanceIndex].push(...projected);
@@ -349,13 +347,12 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
         const normal: Vec3 = [u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]];
         const length = Math.hypot(...normal) || 1;
         const shade = Math.max(0, (normal[0]*light[0] + normal[1]*light[1] + normal[2]*light[2]) / length);
-        return { projected, localPoints, depth: transformed.reduce((sum, point) => sum + point[2], 0) / transformed.length, shade, material, instanceIndex, faceIndex };
+        return { projected, localPoints, depth: transformed.reduce((sum, point) => sum + point[2], 0) / transformed.length, shade, material, instanceIndex, surfaceId };
       }).sort((a, b) => a.depth - b.depth);
       ctx.lineJoin = "round";
       const patternCache = new Map<string, { image: HTMLImageElement; pattern: CanvasPattern }>();
-      for (const { projected, localPoints, shade, material, instanceIndex, faceIndex } of visibleFaces) {
-        const surfaceIndex = materialSurfaceIndex(shape, faceIndex);
-        const assignedMaterial = faceMaterials[faceMaterialKey(instanceIndex, surfaceIndex)];
+      for (const { projected, localPoints, shade, material, instanceIndex, surfaceId } of visibleFaces) {
+        const assignedMaterial = faceMaterials[faceMaterialKey(instanceIndex, surfaceId)];
         const image = assignedMaterial ? textureImage(assignedMaterial.src, draw) : null;
         ctx.beginPath();
         projected.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
@@ -379,7 +376,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
         ctx.strokeStyle = material === "inside" ? "rgba(255,255,255,.08)" : material === "hook" ? "rgba(24,33,45,.48)" : material === "lid" ? "rgba(90,34,12,.38)" : "rgba(68,28,12,.22)";
         ctx.lineWidth = material === "lid" ? 1 : .75;
         ctx.stroke();
-        if (!cleanCapture && materialPickerEnabled && instanceIndex === selectedIndex && surfaceIndex === selectedFaceIndex) {
+        if (!cleanCapture && materialPickerEnabled && instanceIndex === selectedIndex && selectedSurfaceIds.includes(surfaceId)) {
           ctx.fillStyle = "rgba(238,106,53,.18)";
           ctx.fill();
           ctx.strokeStyle = "rgba(217,81,29,.95)";
@@ -387,7 +384,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
           ctx.stroke();
         }
       }
-      faceRegionsRef.current = visibleFaces.map(({ instanceIndex, faceIndex, projected }) => ({ instanceIndex, faceIndex: materialSurfaceIndex(shape, faceIndex), polygon: projected }));
+      faceRegionsRef.current = visibleFaces.map(({ instanceIndex, surfaceId, projected }) => ({ instanceIndex, surfaceId, polygon: projected }));
       const regions = instanceProjected.map((points, index) => {
         const xs = points.map((point) => point.x), ys = points.map((point) => point.y);
         const left = Math.min(...xs), right = Math.max(...xs), top = Math.min(...ys), bottom = Math.max(...ys);
@@ -424,7 +421,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
     const observer = new ResizeObserver(() => draw());
     observer.observe(container);
     return () => { observer.disconnect(); drawSceneRef.current = null; };
-  }, [canvasRef, hitRegionsRef, faceRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, hookEnabled, hookSizes, positions, selectedIndex, selectedFaceIndex, faceMaterials, materialPickerEnabled]);
+  }, [canvasRef, hitRegionsRef, faceRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, hookEnabled, hookSizes, positions, selectedIndex, selectedSurfaceIds, faceMaterials, materialPickerEnabled]);
 }
 
 function DimensionControl({ label, axis, value, unit, minValue, maxValue, onChange }: { label: string; axis: string; value: number; unit: string; minValue?: number; maxValue?: number; onChange: (value: number) => void }) {
@@ -445,9 +442,9 @@ export default function ShapeStudio() {
   const [shape, setShape] = useState<ShapeType>("garment");
   const isGarment = shape === "garment";
   const [workspaces, setWorkspaces] = useState<Record<ShapeType, ShapeWorkspace>>({
-    garment: { dimensions: { width: 1, height: 1, depth: 1, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [72], hookEnabled: [false], hookSizes: [1], selectedIndex: 0, selectedFaceIndex: null, faceMaterials: {} },
-    box: { dimensions: { width: 4, height: 3, depth: 2.5, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [0], hookEnabled: [false], hookSizes: [1], selectedIndex: 0, selectedFaceIndex: null, faceMaterials: {} },
-    cylinder: { dimensions: { width: 3, height: 4, depth: 3, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [0], hookEnabled: [false], hookSizes: [1], selectedIndex: 0, selectedFaceIndex: null, faceMaterials: {} },
+    garment: { dimensions: { width: 1, height: 1, depth: 1, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [72], hookEnabled: [false], hookSizes: [1], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {} },
+    box: { dimensions: { width: 4, height: 3, depth: 2.5, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [0], hookEnabled: [false], hookSizes: [1], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {} },
+    cylinder: { dimensions: { width: 3, height: 4, depth: 3, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [0], hookEnabled: [false], hookSizes: [1], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {} },
   });
   const [rotation, setRotation] = useState({ yaw: -.62, pitch: -.38 });
   const [zoom, setZoom] = useState(1);
@@ -457,16 +454,17 @@ export default function ShapeStudio() {
   const [focalLength, setFocalLength] = useState(35);
   const [captureStatus, setCaptureStatus] = useState(false);
   const [materialPickerEnabled, setMaterialPickerEnabled] = useState(false);
-  const { dimensions, positions, lidAngles, crownRoundness, hookEnabled, hookSizes, selectedIndex, selectedFaceIndex, faceMaterials } = workspaces[shape];
+  const { dimensions, positions, lidAngles, crownRoundness, hookEnabled, hookSizes, selectedIndex, selectedSurfaceIds, faceMaterials } = workspaces[shape];
   const quantity = positions.length;
   const dimensionLabel = (value: number) => isGarment ? `${Math.round(value * 100)}%` : `${value.toFixed(1)} cm`;
   const selectedLidAngle = lidAngles[selectedIndex] ?? 0;
   const selectedRoundness = crownRoundness[selectedIndex] ?? 72;
   const selectedHookEnabled = hookEnabled[selectedIndex] ?? false;
   const selectedHookSize = hookSizes[selectedIndex] ?? 1;
-  const selectedFaceMaterial = selectedFaceIndex === null ? null : faceMaterials[faceMaterialKey(selectedIndex, selectedFaceIndex)] ?? null;
+  const primarySurfaceId = selectedSurfaceIds[0] ?? null;
+  const selectedFaceMaterial = primarySurfaceId ? faceMaterials[faceMaterialKey(selectedIndex, primarySurfaceId)] ?? null : null;
   const groundMinY = groundOffsetFor(shape, dimensions, selectedLidAngle);
-  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, hookEnabled, hookSizes, positions, selectedIndex, selectedFaceIndex, faceMaterials, materialPickerEnabled);
+  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, hookEnabled, hookSizes, positions, selectedIndex, selectedSurfaceIds, faceMaterials, materialPickerEnabled);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -493,7 +491,7 @@ export default function ShapeStudio() {
     }) };
     return separateOverlappingInstances(shape, resized, groundEnabled);
   }), [shape, groundEnabled, updateWorkspace]);
-  const selectInstance = (index: number) => updateWorkspace(shape, (workspace) => ({ ...workspace, selectedIndex: index, selectedFaceIndex: null }));
+  const selectInstance = (index: number) => updateWorkspace(shape, (workspace) => ({ ...workspace, selectedIndex: index, selectedSurfaceIds: [] }));
   const toggleGround = () => {
     if (groundEnabled) { setGroundEnabled(false); return; }
     setWorkspaces((current) => {
@@ -520,7 +518,7 @@ export default function ShapeStudio() {
         hookSizes: workspace.hookSizes.slice(0, next),
         faceMaterials: Object.fromEntries(Object.entries(workspace.faceMaterials).filter(([key]) => Number(key.split(':')[0]) < next)),
         selectedIndex: Math.min(next - 1, workspace.selectedIndex),
-        selectedFaceIndex: null,
+        selectedSurfaceIds: [],
       };
       const nextPositions = [...workspace.positions];
       const nextLidAngles = [...workspace.lidAngles];
@@ -577,35 +575,35 @@ export default function ShapeStudio() {
     hookSizes: workspace.hookSizes.map((value, index) => index === workspace.selectedIndex ? size : value),
   }, groundEnabled));
   const uploadSelectedFaceTexture = (file: File | undefined) => {
-    if (!file || selectedFaceIndex === null) return;
-    const targetShape = shape, targetInstance = selectedIndex, targetFace = selectedFaceIndex;
+    if (!file || !selectedSurfaceIds.length) return;
+    const targetShape = shape, targetInstance = selectedIndex, targetSurfaces = [...selectedSurfaceIds];
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result !== 'string') return;
-      updateWorkspace(targetShape, (workspace) => ({
-        ...workspace,
-        faceMaterials: {
-          ...workspace.faceMaterials,
-          [faceMaterialKey(targetInstance, targetFace)]: { src: reader.result as string, name: file.name, size: 1 },
-        },
-      }));
+      updateWorkspace(targetShape, (workspace) => {
+        const faceMaterials = { ...workspace.faceMaterials };
+        targetSurfaces.forEach((surfaceId) => { faceMaterials[faceMaterialKey(targetInstance, surfaceId)] = { src: reader.result as string, name: file.name, size: 1 }; });
+        return { ...workspace, faceMaterials };
+      });
     };
     reader.readAsDataURL(file);
   };
   const changeSelectedTextureSize = (size: number) => {
-    if (selectedFaceIndex === null) return;
-    const key = faceMaterialKey(selectedIndex, selectedFaceIndex);
-    updateWorkspace(shape, (workspace) => workspace.faceMaterials[key] ? ({
-      ...workspace,
-      faceMaterials: { ...workspace.faceMaterials, [key]: { ...workspace.faceMaterials[key], size } },
-    }) : workspace);
-  };
-  const removeSelectedFaceTexture = () => {
-    if (selectedFaceIndex === null) return;
-    const key = faceMaterialKey(selectedIndex, selectedFaceIndex);
+    if (!selectedSurfaceIds.length) return;
     updateWorkspace(shape, (workspace) => {
       const faceMaterials = { ...workspace.faceMaterials };
-      delete faceMaterials[key];
+      selectedSurfaceIds.forEach((surfaceId) => {
+        const key = faceMaterialKey(selectedIndex, surfaceId);
+        if (faceMaterials[key]) faceMaterials[key] = { ...faceMaterials[key], size };
+      });
+      return { ...workspace, faceMaterials };
+    });
+  };
+  const removeSelectedFaceTexture = () => {
+    if (!selectedSurfaceIds.length) return;
+    updateWorkspace(shape, (workspace) => {
+      const faceMaterials = { ...workspace.faceMaterials };
+      selectedSurfaceIds.forEach((surfaceId) => delete faceMaterials[faceMaterialKey(selectedIndex, surfaceId)]);
       return { ...workspace, faceMaterials };
     });
   };
@@ -665,7 +663,7 @@ export default function ShapeStudio() {
       <section className="viewport-panel" aria-label="3D 预览区">
         <div className="viewport-meta"><div><span className="eyebrow">PERSPECTIVE / {focalLength}mm</span><strong>{SHAPES.find((item) => item.id === shape)?.label} × {quantity}</strong></div><div className="view-actions"><Button className="capture-button" size="sm" onClick={saveJpg}><Download size={15}/>{captureStatus ? "已保存" : "拍照 JPG"}</Button><Button variant="ghost" size="sm" onClick={toggleGround} aria-pressed={groundEnabled}>{groundEnabled ? <Minus size={15}/> : <Plus size={15}/>} {groundEnabled ? "移除地面" : "添加地面"}</Button><Button variant="ghost" size="sm" onClick={() => setGridVisible((v) => !v)} aria-pressed={gridVisible}><Grid3X3 size={16} />网格</Button><Button variant="ghost" size="sm" onClick={resetView}><Redo2 size={15} />复位</Button></div></div>
         <div className={`canvas-stage ${captureStatus ? "is-captured" : ""}`}><canvas ref={canvasRef} tabIndex={0} aria-label="1比1画布，点中图形可自由拖动位置，拖动空白旋转视角"
-          onPointerDown={(e) => { const rect=e.currentTarget.getBoundingClientRect(); const x=e.clientX-rect.left,y=e.clientY-rect.top; const faceHit=materialPickerEnabled?[...faceRegionsRef.current].reverse().find((region)=>pointInPolygon(x,y,region.polygon)):undefined; if(faceHit){ updateWorkspace(shape,(workspace)=>({...workspace,selectedIndex:faceHit.instanceIndex,selectedFaceIndex:faceHit.faceIndex})); return; } const hit=[...hitRegionsRef.current].sort((a,b)=>a.radius-b.radius).find((region)=>Math.hypot(x-region.x,y-region.y)<=region.radius+10); e.currentTarget.setPointerCapture(e.pointerId); if(hit)selectInstance(hit.index); pointerRef.current = { id:e.pointerId, x:e.clientX, y:e.clientY, action:hit?"object":"camera", objectIndex:hit?.index ?? -1 }; e.currentTarget.classList.add(hit?"is-moving-object":"is-dragging"); }}
+          onPointerDown={(e) => { const rect=e.currentTarget.getBoundingClientRect(); const x=e.clientX-rect.left,y=e.clientY-rect.top; const faceHit=materialPickerEnabled?[...faceRegionsRef.current].reverse().find((region)=>pointInPolygon(x,y,region.polygon)):undefined; if(faceHit){ const append=e.shiftKey; updateWorkspace(shape,(workspace)=>({...workspace,selectedIndex:faceHit.instanceIndex,selectedSurfaceIds:updateSurfaceSelection(workspace.selectedIndex===faceHit.instanceIndex?workspace.selectedSurfaceIds:[],faceHit.surfaceId,append)})); return; } const hit=[...hitRegionsRef.current].sort((a,b)=>a.radius-b.radius).find((region)=>Math.hypot(x-region.x,y-region.y)<=region.radius+10); e.currentTarget.setPointerCapture(e.pointerId); if(hit)selectInstance(hit.index); pointerRef.current = { id:e.pointerId, x:e.clientX, y:e.clientY, action:hit?"object":"camera", objectIndex:hit?.index ?? -1 }; e.currentTarget.classList.add(hit?"is-moving-object":"is-dragging"); }}
           onPointerMove={(e) => { const p=pointerRef.current; if(!p||p.id!==e.pointerId)return; const dx=e.clientX-p.x,dy=e.clientY-p.y; if(p.action==="camera")setRotation((r)=>({yaw:r.yaw+dx*.009,pitch:Math.max(-1.48,Math.min(1.48,r.pitch+dy*.009))})); else { const canvas=e.currentTarget; const factor=2.45/(Math.max(220,Math.min(canvas.clientWidth,canvas.clientHeight))*zoom); const [wx,wy,wz]=inverseRotate([dx*factor,-dy*factor,0],rotation.yaw,rotation.pitch); updateWorkspace(shape,(workspace)=>{ const current=workspace.positions[p.objectIndex]; const desired=[current[0]+wx,current[1]+wy,current[2]+wz] as Vec3; const resolved=collisionSafePosition(shape,workspace,p.objectIndex,desired,groundEnabled); return { ...workspace, positions:workspace.positions.map((position,index)=>index===p.objectIndex?resolved:position) }; }); } pointerRef.current={...p,x:e.clientX,y:e.clientY}; }}
           onPointerUp={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object"); }} onPointerCancel={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object"); }} onDoubleClick={resetView}
           onWheel={(e) => { e.preventDefault(); setZoom((z)=>Math.max(Math.min(MIN_ZOOM,zoomLimit * .5),Math.min(zoomLimit,z-e.deltaY*.0015))); }}
@@ -691,14 +689,15 @@ export default function ShapeStudio() {
           </div>
         </section>
         <section className="editor-section material-section" aria-label="模型表面材质">
-          <div className="section-heading"><span><Palette size={16}/>表面材质</span><output>{surfaceLabel(shape, selectedFaceIndex)}</output></div>
-          <p>启用选面后点击画布中的具体表面；每个模型、每个面都可使用不同贴图。</p>
+          <div className="section-heading"><span><Palette size={16}/>表面材质</span><output>{selectedSurfaceIds.length > 1 ? `${selectedSurfaceIds.length} 个面` : surfaceLabel(shape, primarySurfaceId)}</output></div>
+          <p>点击选择单个表面；按住 Shift 再点击可追加或取消多个面，并统一添加同一种贴图。</p>
           <Button className="material-mode-button" variant={materialPickerEnabled?"default":"outline"} aria-pressed={materialPickerEnabled} onClick={()=>setMaterialPickerEnabled((enabled)=>!enabled)}><MousePointer2 size={15}/>{materialPickerEnabled?"正在选面 · 点击表面":"启用选面"}</Button>
-          {selectedFaceIndex === null ? <div className="material-empty">请先启用选面，并点击需要添加材质的表面</div> : <>
-            <label className="texture-upload"><Upload size={15}/><span>{selectedFaceMaterial?"更换无缝贴图":"上传无缝贴图"}</span><input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event)=>{ uploadSelectedFaceTexture(event.currentTarget.files?.[0]); event.currentTarget.value=''; }} /></label>
+          {!selectedSurfaceIds.length ? <div className="material-empty">请先启用选面，并点击需要添加材质的表面</div> : <>
+            <div className="selected-surface-list">{selectedSurfaceIds.map((surfaceId)=><span key={surfaceId}>{surfaceLabel(shape,surfaceId)}</span>)}</div>
+            <label className="texture-upload"><Upload size={15}/><span>{selectedSurfaceIds.length > 1 ? `应用贴图到 ${selectedSurfaceIds.length} 个面` : selectedFaceMaterial?"更换无缝贴图":"上传无缝贴图"}</span><input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event)=>{ uploadSelectedFaceTexture(event.currentTarget.files?.[0]); event.currentTarget.value=''; }} /></label>
             {selectedFaceMaterial && <>
-              <div className="texture-status"><span className="status-dot"/><div><strong>立方体投射已启用</strong><small title={selectedFaceMaterial.name}>{selectedFaceMaterial.name}</small></div><Button variant="ghost" size="icon" aria-label="移除当前面的材质" onClick={removeSelectedFaceTexture}><Trash2 size={14}/></Button></div>
-              <div className="texture-size-control"><div className="control-heading"><span><Maximize2 size={15}/>贴图大小</span><output>{Math.round(selectedFaceMaterial.size * 100)}%</output></div><Slider aria-label={`形体 ${selectedIndex+1} ${surfaceLabel(shape, selectedFaceIndex)} 贴图大小`} min={25} max={400} step={1} value={[Math.round(selectedFaceMaterial.size * 100)]} onValueChange={([next])=>changeSelectedTextureSize(next / 100)} /><div className="slider-ends"><span>25% · 更多重复</span><span>400% · 更大纹理</span></div></div>
+              <div className="texture-status"><span className="status-dot"/><div><strong>立方体投射已启用</strong><small title={selectedFaceMaterial.name}>{selectedFaceMaterial.name}</small></div><Button variant="ghost" size="icon" aria-label="移除所选面的材质" onClick={removeSelectedFaceTexture}><Trash2 size={14}/></Button></div>
+              <div className="texture-size-control"><div className="control-heading"><span><Maximize2 size={15}/>贴图大小</span><label className="value-field texture-value-field"><input aria-label="输入贴图大小百分比" type="number" min={25} max={400} step={1} value={Math.round(selectedFaceMaterial.size * 100)} onChange={(event)=>changeSelectedTextureSize(textureSizeFromPercent(Number(event.target.value)))} /><span>%</span></label></div><Slider aria-label={`形体 ${selectedIndex+1} 所选表面贴图大小`} min={25} max={400} step={1} value={[Math.round(selectedFaceMaterial.size * 100)]} onValueChange={([next])=>changeSelectedTextureSize(next / 100)} /><div className="slider-ends"><span>25% · 更多重复</span><span>400% · 更大纹理</span></div></div>
             </>}
           </>}
           <div className="projection-note"><Grid3X3 size={14}/><span>立方体投射会依据表面方向自动选择 X / Y / Z 轴，无缝贴图可连续包裹模型。</span></div>
