@@ -1,5 +1,6 @@
 export type ProjectionPoint = [number, number, number];
 export type UvPoint = [number, number];
+export type ProjectionBounds = { min: ProjectionPoint; max: ProjectionPoint };
 const cleanZero = (value: number) => Object.is(value, -0) ? 0 : value;
 const uv = (u: number, v: number): UvPoint => [cleanZero(u), cleanZero(v)];
 
@@ -22,6 +23,26 @@ export function cubeProjectionUvs(points: ProjectionPoint[]): UvPoint[] {
   if (nx >= ny && nx >= nz) return points.map(([, y, z]) => uv(normal[0] >= 0 ? -z : z, -y));
   if (ny >= nx && ny >= nz) return points.map(([x, , z]) => uv(x, normal[1] >= 0 ? z : -z));
   return points.map(([x, y]) => uv(normal[2] >= 0 ? x : -x, -y));
+}
+
+/** Generated UVW coordinates: planar faces use model bounds, curved sides unwrap continuously. */
+export function uvwProjectionUvs(points: ProjectionPoint[], surfaceId: string, bounds: ProjectionBounds): UvPoint[] {
+  const range = bounds.max.map((value, axis) => Math.max(1e-6, value - bounds.min[axis])) as ProjectionPoint;
+  const normalized = points.map((point) => point.map((value, axis) => (value - bounds.min[axis]) / range[axis]) as ProjectionPoint);
+  if (surfaceId.includes('side') || surfaceId === 'lid-edge') {
+    const centerX = (bounds.min[0] + bounds.max[0]) / 2;
+    const centerZ = (bounds.min[2] + bounds.max[2]) / 2;
+    const radiusX = range[0] / 2, radiusZ = range[2] / 2;
+    const result = points.map(([x,y,z], index) => uv((Math.atan2((z-centerZ)/radiusZ, (x-centerX)/radiusX) + Math.PI) / (Math.PI*2), normalized[index][1]));
+    const values = result.map(([u]) => u);
+    if (Math.max(...values) - Math.min(...values) > .5) return result.map(([u,v]) => uv(u < .5 ? u + 1 : u, v));
+    return result;
+  }
+  const normal = faceNormal(points);
+  const [nx, ny, nz] = normal.map(Math.abs);
+  if (nx >= ny && nx >= nz) return normalized.map(([,y,z]) => uv(z, 1-y));
+  if (ny >= nx && ny >= nz) return normalized.map(([x,,z]) => uv(x,z));
+  return normalized.map(([x,y]) => uv(x,1-y));
 }
 
 /** Maps a source UV triangle to a projected screen triangle. */
