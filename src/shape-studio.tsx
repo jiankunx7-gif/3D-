@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Camera, Circle, Copy, Cylinder, DoorOpen, Download, Grid3X3, ImageIcon, Link2, LocateFixed, Maximize2, Minus, MousePointer2, Move3D, Palette, Plus, Redo2, Rotate3D, Shirt, Trash2, Upload } from "lucide-react";
+import { Box, Camera, Circle, Copy, Cylinder, DoorOpen, Download, Grid3X3, ImageIcon, Link2, LocateFixed, Maximize2, Minus, MousePointer2, Move3D, Palette, Plus, Redo2, Rotate3D, Scissors, Shirt, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { garmentFaces } from './garment-model';
+import { openingContourOnFace, openingContourOnSide, openingShapeLabel, openingsOverlap, openingSideWallQuads, openingWallQuads, type GarmentOpening, type OpeningShape } from './garment-openings';
 import { boundsOverlap, resolveCollisionMove, spawnBeside, worldBounds, type CollisionBounds } from './collision';
 import { affineTriangleMap, cubeProjectionUvs, textureWorldPeriod, uvwProjectionUvs, type ProjectionBounds } from './texture-projection';
 import { cloneInstanceMaterials, decalPercent, normalizedModelColor, scaledDecalDimensions, shadedModelColor, textureSizeFromPercent, updateSurfaceSelection } from './surface-material';
@@ -15,11 +16,12 @@ type Vec3 = [number, number, number];
 type ProjectionMode = 'cube' | 'uvw';
 type TextureMaterial = { src: string; name: string; size: number; projection: ProjectionMode };
 type Decal = { src: string; name: string; u: number; v: number; width: number; height: number; scale: number };
-type ShapeWorkspace = { dimensions: Dimensions; positions: Vec3[]; lidAngles: number[]; crownRoundness: number[]; hookEnabled: boolean[]; hookSizes: number[]; colors: string[]; selectedIndex: number; selectedSurfaceIds: string[]; faceMaterials: Record<string, TextureMaterial>; decals: Record<string, Decal> };
+type ShapeWorkspace = { dimensions: Dimensions; positions: Vec3[]; lidAngles: number[]; crownRoundness: number[]; hookEnabled: boolean[]; hookSizes: number[]; colors: string[]; selectedIndex: number; selectedSurfaceIds: string[]; faceMaterials: Record<string, TextureMaterial>; decals: Record<string, Decal>; openings: GarmentOpening[][]; selectedOpeningId: string | null; openingSurfaceId: 'front' | 'back' | 'side' };
 type SceneFace = { points: Vec3[]; material: "body" | "lid" | "inside" | "trim" | "hook"; surfaceId: string };
 type InstanceFace = SceneFace & { instanceIndex: number; localPoints: Vec3[] };
 type HitRegion = { index: number; x: number; y: number; radius: number };
-type FaceHitRegion = { instanceIndex: number; surfaceId: string; polygon: { x: number; y: number }[] };
+type FaceHitRegion = { instanceIndex: number; surfaceId: string; polygon: { x: number; y: number }[]; holes?: { x: number; y: number }[][] };
+type OpeningHitRegion = { instanceIndex: number; openingId: string; surfaceId: 'front' | 'back' | 'side'; polygon: { x: number; y: number }[] };
 const GROUND_Y = -0.64;
 const MIN_ZOOM = 0.62;
 const MAX_ZOOM_SEARCH = 6;
@@ -127,17 +129,64 @@ function sceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle: number, 
   return faces;
 }
 
-function positionedSceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngles: number[], crownRoundness: number[], hookEnabled: boolean[], hookSizes: number[], positions: Vec3[]): InstanceFace[] {
+function garmentInteriorFaces(faces: InstanceFace[], openings: GarmentOpening[]): InstanceFace[] {
+  if (!openings.length) return [];
+  const result: InstanceFace[] = [];
+  const bodyPoints = faces.filter((face) => face.material !== 'hook').flatMap((face) => face.localPoints);
+  const depthRange = Math.max(...bodyPoints.map((point) => point[2])) - Math.min(...bodyPoints.map((point) => point[2]));
+  const wallDepth = Math.max(.004, depthRange * .07);
+  const instanceIndex = faces[0]?.instanceIndex ?? 0;
+  const position = faces[0] ? faces[0].points[0].map((value,axis) => value - faces[0].localPoints[0][axis]) as Vec3 : [0,0,0];
+  const surfacesWithOpenings = new Set(openings.map((opening) => opening.surfaceId));
+  openings.forEach((opening) => {
+    const sideFaces = faces.filter((face) => face.surfaceId === 'side');
+    const panel = faces.find((face) => face.surfaceId === opening.surfaceId);
+    if (!panel) return;
+    const sideResult = opening.surfaceId === 'side' ? openingSideWallQuads(opening,sideFaces.map((face)=>face.localPoints),wallDepth) : null;
+    const localWalls = (sideResult?.walls ?? openingWallQuads(opening,panel.localPoints,wallDepth)) as Vec3[][];
+    localWalls.forEach((localPoints) => result.push({
+      material:'inside', surfaceId:`opening-wall-${opening.id}`, instanceIndex, localPoints,
+      points:localPoints.map((point) => point.map((value,axis) => value + position[axis]) as Vec3),
+    }));
+    if (sideResult) {
+      const localPoints = sideResult.inner.map(([x,y,z]) => {
+        const centerX=bodyPoints.reduce((sum,point)=>sum+point[0],0)/bodyPoints.length;
+        const centerY=bodyPoints.reduce((sum,point)=>sum+point[1],0)/bodyPoints.length;
+        const distance=Math.hypot(centerX-x,centerY-y)||1;
+        return [x+(centerX-x)/distance*wallDepth*2.5,y+(centerY-y)/distance*wallDepth*2.5,z] as Vec3;
+      });
+      result.push({ material:'inside', surfaceId:`opening-cavity-${opening.id}`, instanceIndex, localPoints, points:localPoints.map((point)=>point.map((value,axis)=>value+position[axis]) as Vec3) });
+    }
+  });
+  if (surfacesWithOpenings.has('front')) {
+    const back = faces.find((face) => face.surfaceId === 'back');
+    if (back) {
+      const localPoints = back.localPoints.map(([x,y,z]) => [x,y,z + wallDepth] as Vec3);
+      result.push({ material:'inside', surfaceId:'inside-back', instanceIndex, localPoints, points:localPoints.map((point) => point.map((value,axis) => value + position[axis]) as Vec3) });
+    }
+  }
+  if (surfacesWithOpenings.has('back')) {
+    const front = faces.find((face) => face.surfaceId === 'front');
+    if (front) {
+      const localPoints = front.localPoints.map(([x,y,z]) => [x,y,z - wallDepth] as Vec3);
+      result.push({ material:'inside', surfaceId:'inside-front', instanceIndex, localPoints, points:localPoints.map((point) => point.map((value,axis) => value + position[axis]) as Vec3) });
+    }
+  }
+  return result;
+}
+
+function positionedSceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngles: number[], crownRoundness: number[], hookEnabled: boolean[], hookSizes: number[], positions: Vec3[], openingsByInstance: GarmentOpening[][] = []): InstanceFace[] {
   const fit = shape === 'garment' ? 1 : Math.max(dimensions.width * dimensions.scale, dimensions.height * dimensions.scale, dimensions.depth * dimensions.scale, .1);
-  return positions.flatMap(([offsetX, offsetY, offsetZ], instanceIndex) =>
-    sceneFaces(shape, dimensions, lidAngles[instanceIndex] ?? 0, crownRoundness[instanceIndex] ?? 72, hookEnabled[instanceIndex] ?? false, hookSizes[instanceIndex] ?? 1).map(({ points, material, surfaceId }) => ({
+  return positions.flatMap(([offsetX, offsetY, offsetZ], instanceIndex) => {
+    const faces = sceneFaces(shape, dimensions, lidAngles[instanceIndex] ?? 0, crownRoundness[instanceIndex] ?? 72, hookEnabled[instanceIndex] ?? false, hookSizes[instanceIndex] ?? 1).map(({ points, material, surfaceId }) => ({
       material,
       surfaceId,
       instanceIndex,
       localPoints: points.map(([x,y,z]) => [x / fit, y / fit, z / fit] as Vec3),
       points: points.map(([x,y,z]) => [x / fit + offsetX, y / fit + offsetY, z / fit + offsetZ] as Vec3),
-    }))
-  );
+    }));
+    return shape === 'garment' ? [...faces,...garmentInteriorFaces(faces,openingsByInstance[instanceIndex] ?? [])] : faces;
+  });
 }
 
 function groundOffsetFor(shape: ShapeType, dimensions: Dimensions, lidAngle: number) {
@@ -264,6 +313,17 @@ function pointInPolygon(x: number, y: number, polygon: { x: number; y: number }[
   return inside;
 }
 
+function tracePolygon(ctx: CanvasRenderingContext2D, polygon: { x: number; y: number }[]) {
+  polygon.forEach((point,index) => index === 0 ? ctx.moveTo(point.x,point.y) : ctx.lineTo(point.x,point.y));
+  ctx.closePath();
+}
+
+function traceFaceWithHoles(ctx: CanvasRenderingContext2D, polygon: { x: number; y: number }[], holes: { x: number; y: number }[][]) {
+  ctx.beginPath();
+  tracePolygon(ctx,polygon);
+  holes.forEach((hole) => tracePolygon(ctx,hole));
+}
+
 function fillProjectedTexture(ctx: CanvasRenderingContext2D, pattern: CanvasPattern, image: HTMLImageElement, localPoints: Vec3[], projected: { x: number; y: number }[], material: TextureMaterial, surfaceId: string, bounds: ProjectionBounds) {
   if (localPoints.length < 3 || projected.length < 3) return;
   const uvs = material.projection === 'uvw'
@@ -306,7 +366,7 @@ function fillProjectedDecal(ctx: CanvasRenderingContext2D, image: HTMLImageEleme
   }
 }
 
-function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, faceRegionsRef: React.MutableRefObject<FaceHitRegion[]>, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, shape: ShapeType, dimensions: Dimensions, rotation: { yaw: number; pitch: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, lidAngles: number[], crownRoundness: number[], hookEnabled: boolean[], hookSizes: number[], positions: Vec3[], colors: string[], selectedIndex: number, selectedSurfaceIds: string[], faceMaterials: Record<string, TextureMaterial>, decals: Record<string, Decal>, materialPickerEnabled: boolean) {
+function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, faceRegionsRef: React.MutableRefObject<FaceHitRegion[]>, openingRegionsRef: React.MutableRefObject<OpeningHitRegion[]>, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, shape: ShapeType, dimensions: Dimensions, rotation: { yaw: number; pitch: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, lidAngles: number[], crownRoundness: number[], hookEnabled: boolean[], hookSizes: number[], positions: Vec3[], colors: string[], selectedIndex: number, selectedSurfaceIds: string[], faceMaterials: Record<string, TextureMaterial>, decals: Record<string, Decal>, openings: GarmentOpening[][], selectedOpeningId: string | null, materialPickerEnabled: boolean, openingPickerEnabled: boolean) {
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = canvas?.parentElement;
@@ -326,7 +386,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
       const background = ctx.createRadialGradient(w * .52, h * .4, 12, w * .52, h * .4, Math.max(w,h) * .72);
       background.addColorStop(0, "#ffffff"); background.addColorStop(.48, "#f7f8f9"); background.addColorStop(1, "#eef1f3");
       ctx.fillStyle = background; ctx.fillRect(0, 0, w, h);
-      const scene = positionedSceneFaces(shape, dimensions, lidAngles, crownRoundness, hookEnabled, hookSizes, positions);
+      const scene = positionedSceneFaces(shape, dimensions, lidAngles, crownRoundness, hookEnabled, hookSizes, positions, openings);
       const lensRatio = focalLength / 35;
       const cameraDistance = (4.25 * lensRatio) / zoom;
       const focal = Math.min(w, h) * 1.75 * lensRatio;
@@ -369,9 +429,20 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
         bounds[face.instanceIndex] = current;
         return bounds;
       }, [] as ProjectionBounds[]);
+      const openingWorldContours = openings.map((items,instanceIndex) => {
+        const instanceFaces=scene.filter((face)=>face.instanceIndex===instanceIndex);
+        const sideFaces=instanceFaces.filter((face)=>face.surfaceId==='side').map((face)=>face.points);
+        return items.map((opening) => {
+          const panel=instanceFaces.find((face)=>face.surfaceId===opening.surfaceId);
+          const points=opening.surfaceId==='side' ? openingContourOnSide(opening,sideFaces) : panel ? openingContourOnFace(opening,panel.points) : [];
+          return { opening,points };
+        });
+      });
       const visibleFaces = scene.map(({ points, localPoints, material, instanceIndex, surfaceId }) => {
         const transformed = points.map((point) => rotate(point, rotation.yaw, rotation.pitch));
         const projected = transformed.map(project);
+        const faceOpenings = shape === 'garment' && (surfaceId === 'front' || surfaceId === 'back' || surfaceId === 'side') ? (openingWorldContours[instanceIndex] ?? []).filter(({ opening }) => opening.surfaceId === surfaceId) : [];
+        const openingContours = faceOpenings.map(({ opening,points:openingPoints }) => ({ opening, polygon:openingPoints.map((point) => project(rotate(point,rotation.yaw,rotation.pitch))) }));
         instanceProjected[instanceIndex].push(...projected);
         const p0 = transformed[0], p1 = transformed[1], p2 = transformed[2];
         const u: Vec3 = [p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]];
@@ -379,19 +450,21 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
         const normal: Vec3 = [u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]];
         const length = Math.hypot(...normal) || 1;
         const shade = Math.max(0, (normal[0]*light[0] + normal[1]*light[1] + normal[2]*light[2]) / length);
-        return { projected, localPoints, depth: transformed.reduce((sum, point) => sum + point[2], 0) / transformed.length, shade, material, instanceIndex, surfaceId };
+        return { projected, localPoints, depth: transformed.reduce((sum, point) => sum + point[2], 0) / transformed.length, shade, material, instanceIndex, surfaceId, openingContours };
       }).sort((a, b) => a.depth - b.depth);
       ctx.lineJoin = "round";
       const patternCache = new Map<string, { image: HTMLImageElement; pattern: CanvasPattern }>();
-      for (const { projected, localPoints, shade, material, instanceIndex, surfaceId } of visibleFaces) {
+      for (const { projected, localPoints, shade, material, instanceIndex, surfaceId, openingContours } of visibleFaces) {
         const assignedMaterial = faceMaterials[faceMaterialKey(instanceIndex, surfaceId)];
         const assignedDecal = decals[faceMaterialKey(instanceIndex, surfaceId)];
         const image = assignedMaterial ? textureImage(assignedMaterial.src, draw) : null;
         const decalImage = assignedDecal ? textureImage(assignedDecal.src, draw) : null;
         const modelColor = colors[instanceIndex] ?? '#ee6a35';
-        ctx.beginPath();
-        projected.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
-        ctx.closePath();
+        const holePolygons = openingContours.map(({ polygon }) => polygon);
+        ctx.save();
+        ctx.beginPath(); tracePolygon(ctx,projected); ctx.clip();
+        traceFaceWithHoles(ctx,projected,holePolygons);
+        ctx.clip('evenodd');
         if (assignedMaterial && image) {
           let cached = patternCache.get(assignedMaterial.src);
           if (!cached) {
@@ -399,33 +472,36 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
             if (pattern) { cached = { image, pattern }; patternCache.set(assignedMaterial.src, cached); }
           }
           if (cached) fillProjectedTexture(ctx, cached.pattern, cached.image, localPoints, projected, assignedMaterial, surfaceId, localBoundsByInstance[instanceIndex]);
-          ctx.beginPath();
-          projected.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
-          ctx.closePath();
           ctx.fillStyle = `rgba(16,23,31,${Math.max(.04, .2 - shade * .13)})`;
-          ctx.fill();
+          ctx.fillRect(0,0,w,h);
         } else {
           ctx.fillStyle = material === "hook" ? `hsl(215 9% ${34 + shade * 42}%)` : material === "trim" ? shadedModelColor(modelColor, .67 + shade * .28) : material === "inside" ? shadedModelColor(modelColor, .32 + shade * .12) : material === "lid" ? shadedModelColor(modelColor, .82 + shade * .28) : shadedModelColor(modelColor, .7 + shade * .32);
-          ctx.fill();
+          ctx.fillRect(0,0,w,h);
         }
         if (assignedDecal && decalImage) {
           fillProjectedDecal(ctx, decalImage, localPoints, projected, assignedDecal, surfaceId, localBoundsByInstance[instanceIndex]);
-          ctx.beginPath();
-          projected.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
-          ctx.closePath();
         }
+        ctx.restore();
+        ctx.beginPath(); tracePolygon(ctx,projected);
         ctx.strokeStyle = material === "inside" ? "rgba(255,255,255,.08)" : material === "hook" ? "rgba(24,33,45,.48)" : material === "lid" ? "rgba(90,34,12,.38)" : "rgba(68,28,12,.22)";
         ctx.lineWidth = material === "lid" ? 1 : .75;
         ctx.stroke();
+        if (holePolygons.length) {
+          holePolygons.forEach((hole) => { ctx.beginPath(); tracePolygon(ctx,hole); ctx.strokeStyle='rgba(36,25,21,.68)'; ctx.lineWidth=1.25; ctx.stroke(); });
+        }
         if (!cleanCapture && materialPickerEnabled && instanceIndex === selectedIndex && selectedSurfaceIds.includes(surfaceId)) {
-          ctx.fillStyle = "rgba(238,106,53,.18)";
-          ctx.fill();
+          ctx.save(); ctx.beginPath(); tracePolygon(ctx,projected); ctx.clip(); traceFaceWithHoles(ctx,projected,holePolygons); ctx.clip('evenodd'); ctx.fillStyle = "rgba(238,106,53,.18)"; ctx.fillRect(0,0,w,h); ctx.restore();
+          ctx.beginPath(); tracePolygon(ctx,projected);
           ctx.strokeStyle = "rgba(217,81,29,.95)";
           ctx.lineWidth = 2;
           ctx.stroke();
         }
+        if (!cleanCapture && openingPickerEnabled && instanceIndex === selectedIndex && openingContours.some(({ opening }) => opening.id === selectedOpeningId)) {
+          openingContours.filter(({ opening }) => opening.id === selectedOpeningId).forEach(({ polygon }) => { ctx.save(); ctx.beginPath(); tracePolygon(ctx,polygon); ctx.fillStyle='rgba(129,92,179,.18)'; ctx.fill(); ctx.strokeStyle='rgba(105,70,153,.95)'; ctx.lineWidth=2; ctx.setLineDash([5,3]); ctx.stroke(); ctx.restore(); });
+        }
       }
-      faceRegionsRef.current = visibleFaces.map(({ instanceIndex, surfaceId, projected }) => ({ instanceIndex, surfaceId, polygon: projected }));
+      faceRegionsRef.current = visibleFaces.map(({ instanceIndex, surfaceId, projected, openingContours }) => ({ instanceIndex, surfaceId, polygon: projected, holes:openingContours.map(({ polygon })=>polygon) }));
+      openingRegionsRef.current = visibleFaces.flatMap(({ instanceIndex, openingContours }) => openingContours.map(({ opening,polygon }) => ({ instanceIndex, openingId:opening.id, surfaceId:opening.surfaceId, polygon })));
       const regions = instanceProjected.map((points, index) => {
         const xs = points.map((point) => point.x), ys = points.map((point) => point.y);
         const left = Math.min(...xs), right = Math.max(...xs), top = Math.min(...ys), bottom = Math.max(...ys);
@@ -462,7 +538,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
     const observer = new ResizeObserver(() => draw());
     observer.observe(container);
     return () => { observer.disconnect(); drawSceneRef.current = null; };
-  }, [canvasRef, hitRegionsRef, faceRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, hookEnabled, hookSizes, positions, colors, selectedIndex, selectedSurfaceIds, faceMaterials, decals, materialPickerEnabled]);
+  }, [canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, hookEnabled, hookSizes, positions, colors, selectedIndex, selectedSurfaceIds, faceMaterials, decals, openings, selectedOpeningId, materialPickerEnabled, openingPickerEnabled]);
 }
 
 function DimensionControl({ label, axis, value, unit, minValue, maxValue, onChange }: { label: string; axis: string; value: number; unit: string; minValue?: number; maxValue?: number; onChange: (value: number) => void }) {
@@ -477,15 +553,16 @@ export default function ShapeStudio() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hitRegionsRef = useRef<HitRegion[]>([]);
   const faceRegionsRef = useRef<FaceHitRegion[]>([]);
+  const openingRegionsRef = useRef<OpeningHitRegion[]>([]);
   const drawSceneRef = useRef<((cleanCapture?: boolean) => void) | null>(null);
   const pointerRef = useRef<{ id: number; x: number; y: number; action: "object" | "camera"; objectIndex: number } | null>(null);
   const lidAnimationRef = useRef<number | null>(null);
   const [shape, setShape] = useState<ShapeType>("garment");
   const isGarment = shape === "garment";
   const [workspaces, setWorkspaces] = useState<Record<ShapeType, ShapeWorkspace>>({
-    garment: { dimensions: { width: 1, height: 1, depth: 1, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [72], hookEnabled: [false], hookSizes: [1], colors: ['#ee6a35'], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {}, decals: {} },
-    box: { dimensions: { width: 4, height: 3, depth: 2.5, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [0], hookEnabled: [false], hookSizes: [1], colors: ['#ee6a35'], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {}, decals: {} },
-    cylinder: { dimensions: { width: 3, height: 4, depth: 3, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [0], hookEnabled: [false], hookSizes: [1], colors: ['#ee6a35'], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {}, decals: {} },
+    garment: { dimensions: { width: 1, height: 1, depth: 1, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [72], hookEnabled: [false], hookSizes: [1], colors: ['#ee6a35'], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {}, decals: {}, openings:[[]], selectedOpeningId:null, openingSurfaceId:'front' },
+    box: { dimensions: { width: 4, height: 3, depth: 2.5, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [0], hookEnabled: [false], hookSizes: [1], colors: ['#ee6a35'], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {}, decals: {}, openings:[[]], selectedOpeningId:null, openingSurfaceId:'front' },
+    cylinder: { dimensions: { width: 3, height: 4, depth: 3, scale: 1 }, positions: [[0, 0, 0]], lidAngles: [0], crownRoundness: [0], hookEnabled: [false], hookSizes: [1], colors: ['#ee6a35'], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {}, decals: {}, openings:[[]], selectedOpeningId:null, openingSurfaceId:'front' },
   });
   const [rotation, setRotation] = useState({ yaw: -.62, pitch: -.38 });
   const [zoom, setZoom] = useState(1);
@@ -495,8 +572,10 @@ export default function ShapeStudio() {
   const [focalLength, setFocalLength] = useState(35);
   const [captureStatus, setCaptureStatus] = useState(false);
   const [materialPickerEnabled, setMaterialPickerEnabled] = useState(false);
+  const [openingPickerEnabled, setOpeningPickerEnabled] = useState(false);
   const [newMaterialProjection, setNewMaterialProjection] = useState<ProjectionMode>('cube');
-  const { dimensions, positions, lidAngles, crownRoundness, hookEnabled, hookSizes, colors, selectedIndex, selectedSurfaceIds, faceMaterials, decals } = workspaces[shape];
+  const [newOpeningShape, setNewOpeningShape] = useState<OpeningShape>('rounded-rectangle');
+  const { dimensions, positions, lidAngles, crownRoundness, hookEnabled, hookSizes, colors, selectedIndex, selectedSurfaceIds, faceMaterials, decals, openings, selectedOpeningId, openingSurfaceId } = workspaces[shape];
   const quantity = positions.length;
   const dimensionLabel = (value: number) => isGarment ? `${Math.round(value * 100)}%` : `${value.toFixed(1)} cm`;
   const selectedLidAngle = lidAngles[selectedIndex] ?? 0;
@@ -508,8 +587,10 @@ export default function ShapeStudio() {
   const selectedFaceMaterial = primarySurfaceId ? faceMaterials[faceMaterialKey(selectedIndex, primarySurfaceId)] ?? null : null;
   const selectedDecal = primarySurfaceId ? decals[faceMaterialKey(selectedIndex, primarySurfaceId)] ?? null : null;
   const selectedProjection = selectedFaceMaterial?.projection ?? newMaterialProjection;
+  const currentOpenings = openings[selectedIndex] ?? [];
+  const selectedOpening = currentOpenings.find((opening) => opening.id === selectedOpeningId) ?? null;
   const groundMinY = groundOffsetFor(shape, dimensions, selectedLidAngle);
-  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, hookEnabled, hookSizes, positions, colors, selectedIndex, selectedSurfaceIds, faceMaterials, decals, materialPickerEnabled);
+  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, shape, dimensions, rotation, zoom, gridVisible, groundEnabled, focalLength, lidAngles, crownRoundness, hookEnabled, hookSizes, positions, colors, selectedIndex, selectedSurfaceIds, faceMaterials, decals, openings, selectedOpeningId, materialPickerEnabled, openingPickerEnabled);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -536,7 +617,7 @@ export default function ShapeStudio() {
     }) };
     return separateOverlappingInstances(shape, resized, groundEnabled);
   }), [shape, groundEnabled, updateWorkspace]);
-  const selectInstance = (index: number) => updateWorkspace(shape, (workspace) => ({ ...workspace, selectedIndex: index, selectedSurfaceIds: [] }));
+  const selectInstance = (index: number) => updateWorkspace(shape, (workspace) => ({ ...workspace, selectedIndex: index, selectedSurfaceIds: [], selectedOpeningId:null }));
   const toggleGround = () => {
     if (groundEnabled) { setGroundEnabled(false); return; }
     setWorkspaces((current) => {
@@ -562,10 +643,12 @@ export default function ShapeStudio() {
         hookEnabled: workspace.hookEnabled.slice(0, next),
         hookSizes: workspace.hookSizes.slice(0, next),
         colors: workspace.colors.slice(0, next),
+        openings: workspace.openings.slice(0,next),
         faceMaterials: Object.fromEntries(Object.entries(workspace.faceMaterials).filter(([key]) => Number(key.split(':')[0]) < next)),
         decals: Object.fromEntries(Object.entries(workspace.decals).filter(([key]) => Number(key.split(':')[0]) < next)),
         selectedIndex: Math.min(next - 1, workspace.selectedIndex),
         selectedSurfaceIds: [],
+        selectedOpeningId:null,
       };
       const nextPositions = [...workspace.positions];
       const nextLidAngles = [...workspace.lidAngles];
@@ -573,6 +656,7 @@ export default function ShapeStudio() {
       const nextHookEnabled = [...workspace.hookEnabled];
       const nextHookSizes = [...workspace.hookSizes];
       const nextColors = [...workspace.colors];
+      const nextOpenings = workspace.openings.map((items) => [...items]);
       const templateIndex = workspace.selectedIndex;
       let nextFaceMaterials = { ...workspace.faceMaterials };
       let nextDecals = { ...workspace.decals };
@@ -594,11 +678,12 @@ export default function ShapeStudio() {
         nextHookEnabled.push(hasHook);
         nextHookSizes.push(hookSize);
         nextColors.push(workspace.colors[templateIndex] ?? '#ee6a35');
+        nextOpenings.push((workspace.openings[templateIndex] ?? []).map((opening) => ({ ...opening, id:`opening-${Date.now()}-${index}-${Math.random().toString(36).slice(2,7)}` })));
         nextFaceMaterials = cloneInstanceMaterials(nextFaceMaterials, templateIndex, index);
         nextDecals = cloneInstanceMaterials(nextDecals, templateIndex, index);
         if (index >= 11) break;
       }
-      return { ...workspace, positions: nextPositions, lidAngles: nextLidAngles, crownRoundness: nextRoundness, hookEnabled: nextHookEnabled, hookSizes: nextHookSizes, colors: nextColors, faceMaterials: nextFaceMaterials, decals: nextDecals, selectedIndex: workspace.selectedIndex };
+      return { ...workspace, positions: nextPositions, lidAngles: nextLidAngles, crownRoundness: nextRoundness, hookEnabled: nextHookEnabled, hookSizes: nextHookSizes, colors: nextColors, openings:nextOpenings, faceMaterials: nextFaceMaterials, decals: nextDecals, selectedIndex: workspace.selectedIndex };
     });
   };
   const changePosition = (axis: 0 | 1 | 2, value: number) => {
@@ -718,6 +803,55 @@ export default function ShapeStudio() {
       return { ...workspace, decals: nextDecals };
     });
   };
+  const setOpeningSurface = (surfaceId: 'front' | 'back' | 'side') => updateWorkspace('garment', (workspace) => ({ ...workspace, openingSurfaceId:surfaceId }));
+  const addOpening = () => updateWorkspace('garment', (workspace) => {
+    const items = workspace.openings[workspace.selectedIndex] ?? [];
+    if (items.length >= 12) return workspace;
+    const slots = [[.5,.58],[.27,.58],[.73,.58],[.5,.38],[.27,.38],[.73,.38],[.5,.77],[.27,.77],[.73,.77],[.5,.24],[.27,.24],[.73,.24]];
+    const available = slots.find(([u,v]) => !items.some((existing) => openingsOverlap(existing,{ id:'candidate', surfaceId:workspace.openingSurfaceId, shape:newOpeningShape, u, v, width:.18, height:.13, scale:1, rotation:0, cornerRadius:.34 }))) ?? slots[items.length%slots.length];
+    const opening: GarmentOpening = {
+      id:`opening-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
+      surfaceId:workspace.openingSurfaceId,
+      shape:newOpeningShape,
+      u:available[0], v:available[1], width:.18, height:.13, scale:1, rotation:0, cornerRadius:.34,
+    };
+    return { ...workspace, openings:workspace.openings.map((list,index) => index === workspace.selectedIndex ? [...list,opening] : list), selectedOpeningId:opening.id };
+  });
+  const selectOpening = (openingId: string, instanceIndex = selectedIndex) => updateWorkspace('garment', (workspace) => {
+    const opening = workspace.openings[instanceIndex]?.find((item) => item.id === openingId);
+    return { ...workspace, selectedIndex:instanceIndex, selectedOpeningId:openingId, openingSurfaceId:opening?.surfaceId ?? workspace.openingSurfaceId, selectedSurfaceIds:[] };
+  });
+  const changeSelectedOpening = (field: 'u' | 'v' | 'width' | 'height' | 'scale' | 'rotation' | 'cornerRadius', value: number) => updateWorkspace('garment', (workspace) => ({
+    ...workspace,
+    openings:workspace.openings.map((items,index) => index === workspace.selectedIndex ? items.map((opening) => {
+      if (opening.id !== workspace.selectedOpeningId) return opening;
+      const candidate = { ...opening, [field]:value };
+      return items.some((other) => other.id !== opening.id && other.surfaceId === opening.surfaceId && openingsOverlap(candidate,other)) ? opening : candidate;
+    }) : items),
+  }));
+  const chooseOpeningShape = (nextShape: OpeningShape) => {
+    setNewOpeningShape(nextShape);
+    if (!selectedOpeningId) return;
+    updateWorkspace('garment', (workspace) => ({ ...workspace, openings:workspace.openings.map((items,index) => index === workspace.selectedIndex ? items.map((opening) => {
+      if (opening.id !== workspace.selectedOpeningId) return opening;
+      const candidate = { ...opening, shape:nextShape };
+      return items.some((other) => other.id !== opening.id && other.surfaceId === opening.surfaceId && openingsOverlap(candidate,other)) ? opening : candidate;
+    }) : items) }));
+  };
+  const removeSelectedOpening = () => updateWorkspace('garment', (workspace) => ({
+    ...workspace,
+    openings:workspace.openings.map((items,index) => index === workspace.selectedIndex ? items.filter((opening) => opening.id !== workspace.selectedOpeningId) : items),
+    selectedOpeningId:null,
+  }));
+  const duplicateSelectedOpening = () => updateWorkspace('garment', (workspace) => {
+    const items = workspace.openings[workspace.selectedIndex] ?? [];
+    const source = items.find((opening) => opening.id === workspace.selectedOpeningId);
+    if (!source || items.length >= 12) return workspace;
+    const offsets = [[source.width*source.scale+.035,0],[-source.width*source.scale-.035,0],[0,source.height*source.scale+.035],[0,-source.height*source.scale-.035]];
+    const position = offsets.map(([du,dv])=>[Math.max(.08,Math.min(.92,source.u+du)),Math.max(.08,Math.min(.92,source.v+dv))] as const).find(([u,v])=>!items.some((other)=>openingsOverlap({ ...source,u,v },other))) ?? [Math.min(.92,source.u+.08),Math.min(.92,source.v+.08)];
+    const duplicate = { ...source, id:`opening-${Date.now()}-${Math.random().toString(36).slice(2,8)}`, u:position[0], v:position[1] };
+    return { ...workspace, openings:workspace.openings.map((list,index) => index === workspace.selectedIndex ? [...list,duplicate] : list), selectedOpeningId:duplicate.id };
+  });
   const resetView = () => { setRotation({ yaw: -.62, pitch: -.38 }); setZoom(1); };
   const setView = (view: "front" | "top" | "iso") => {
     if (view === "front") setRotation({ yaw: 0, pitch: 0 });
@@ -774,7 +908,7 @@ export default function ShapeStudio() {
       <section className="viewport-panel" aria-label="3D 预览区">
         <div className="viewport-meta"><div><span className="eyebrow">PERSPECTIVE / {focalLength}mm</span><strong>{SHAPES.find((item) => item.id === shape)?.label} × {quantity}</strong></div><div className="view-actions"><Button className="capture-button" size="sm" onClick={saveJpg}><Download size={15}/>{captureStatus ? "已保存" : "拍照 JPG"}</Button><Button variant="ghost" size="sm" onClick={toggleGround} aria-pressed={groundEnabled}>{groundEnabled ? <Minus size={15}/> : <Plus size={15}/>} {groundEnabled ? "移除地面" : "添加地面"}</Button><Button variant="ghost" size="sm" onClick={() => setGridVisible((v) => !v)} aria-pressed={gridVisible}><Grid3X3 size={16} />网格</Button><Button variant="ghost" size="sm" onClick={resetView}><Redo2 size={15} />复位</Button></div></div>
         <div className={`canvas-stage ${captureStatus ? "is-captured" : ""}`}><canvas ref={canvasRef} tabIndex={0} aria-label="1比1画布，点中图形可自由拖动位置，拖动空白旋转视角"
-          onPointerDown={(e) => { const rect=e.currentTarget.getBoundingClientRect(); const x=e.clientX-rect.left,y=e.clientY-rect.top; const faceHit=materialPickerEnabled?[...faceRegionsRef.current].reverse().find((region)=>pointInPolygon(x,y,region.polygon)):undefined; if(faceHit){ const append=e.shiftKey; updateWorkspace(shape,(workspace)=>({...workspace,selectedIndex:faceHit.instanceIndex,selectedSurfaceIds:updateSurfaceSelection(workspace.selectedIndex===faceHit.instanceIndex?workspace.selectedSurfaceIds:[],faceHit.surfaceId,append)})); return; } const hit=[...hitRegionsRef.current].sort((a,b)=>a.radius-b.radius).find((region)=>Math.hypot(x-region.x,y-region.y)<=region.radius+10); e.currentTarget.setPointerCapture(e.pointerId); if(hit)selectInstance(hit.index); pointerRef.current = { id:e.pointerId, x:e.clientX, y:e.clientY, action:hit?"object":"camera", objectIndex:hit?.index ?? -1 }; e.currentTarget.classList.add(hit?"is-moving-object":"is-dragging"); }}
+          onPointerDown={(e) => { const rect=e.currentTarget.getBoundingClientRect(); const x=e.clientX-rect.left,y=e.clientY-rect.top; if(openingPickerEnabled&&shape==='garment'){ const openingHit=[...openingRegionsRef.current].reverse().find((region)=>pointInPolygon(x,y,region.polygon)); if(openingHit){selectOpening(openingHit.openingId,openingHit.instanceIndex);return;} const targetFace=[...faceRegionsRef.current].reverse().find((region)=>(region.surfaceId==='front'||region.surfaceId==='back'||region.surfaceId==='side')&&pointInPolygon(x,y,region.polygon)&&!region.holes?.some((hole)=>pointInPolygon(x,y,hole))); if(targetFace){updateWorkspace('garment',(workspace)=>({...workspace,selectedIndex:targetFace.instanceIndex,openingSurfaceId:targetFace.surfaceId as 'front'|'back'|'side',selectedOpeningId:null,selectedSurfaceIds:[]}));return;} } const faceHit=materialPickerEnabled?[...faceRegionsRef.current].reverse().find((region)=>pointInPolygon(x,y,region.polygon)&&!region.holes?.some((hole)=>pointInPolygon(x,y,hole))):undefined; if(faceHit){ const append=e.shiftKey; updateWorkspace(shape,(workspace)=>({...workspace,selectedIndex:faceHit.instanceIndex,selectedSurfaceIds:updateSurfaceSelection(workspace.selectedIndex===faceHit.instanceIndex?workspace.selectedSurfaceIds:[],faceHit.surfaceId,append)})); return; } const hit=[...hitRegionsRef.current].sort((a,b)=>a.radius-b.radius).find((region)=>Math.hypot(x-region.x,y-region.y)<=region.radius+10); e.currentTarget.setPointerCapture(e.pointerId); if(hit)selectInstance(hit.index); pointerRef.current = { id:e.pointerId, x:e.clientX, y:e.clientY, action:hit?"object":"camera", objectIndex:hit?.index ?? -1 }; e.currentTarget.classList.add(hit?"is-moving-object":"is-dragging"); }}
           onPointerMove={(e) => { const p=pointerRef.current; if(!p||p.id!==e.pointerId)return; const dx=e.clientX-p.x,dy=e.clientY-p.y; if(p.action==="camera")setRotation((r)=>({yaw:r.yaw+dx*.009,pitch:Math.max(-1.48,Math.min(1.48,r.pitch+dy*.009))})); else { const canvas=e.currentTarget; const factor=2.45/(Math.max(220,Math.min(canvas.clientWidth,canvas.clientHeight))*zoom); const [wx,wy,wz]=inverseRotate([dx*factor,-dy*factor,0],rotation.yaw,rotation.pitch); updateWorkspace(shape,(workspace)=>{ const current=workspace.positions[p.objectIndex]; const desired=[current[0]+wx,current[1]+wy,current[2]+wz] as Vec3; const resolved=collisionSafePosition(shape,workspace,p.objectIndex,desired,groundEnabled); return { ...workspace, positions:workspace.positions.map((position,index)=>index===p.objectIndex?resolved:position) }; }); } pointerRef.current={...p,x:e.clientX,y:e.clientY}; }}
           onPointerUp={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object"); }} onPointerCancel={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object"); }} onDoubleClick={resetView}
           onWheel={(e) => { e.preventDefault(); setZoom((z)=>Math.max(Math.min(MIN_ZOOM,zoomLimit * .5),Math.min(zoomLimit,z-e.deltaY*.0015))); }}
@@ -806,7 +940,7 @@ export default function ShapeStudio() {
             <label className="color-picker" title="选择模型颜色"><input aria-label={`形体 ${selectedIndex + 1} 基础颜色`} type="color" value={selectedColor} onChange={(event)=>changeSelectedColor(event.target.value)} /><span>{selectedColor.toUpperCase()}</span></label>
           </div>
           <p>点击选择单个表面；按住 Shift 再点击可追加或取消多个面，并统一添加同一种贴图。</p>
-          <Button className="material-mode-button" variant={materialPickerEnabled?"default":"outline"} aria-pressed={materialPickerEnabled} onClick={()=>setMaterialPickerEnabled((enabled)=>!enabled)}><MousePointer2 size={15}/>{materialPickerEnabled?"正在选面 · 点击表面":"启用选面"}</Button>
+          <Button className="material-mode-button" variant={materialPickerEnabled?"default":"outline"} aria-pressed={materialPickerEnabled} onClick={()=>{setMaterialPickerEnabled((enabled)=>!enabled);setOpeningPickerEnabled(false);}}><MousePointer2 size={15}/>{materialPickerEnabled?"正在选面 · 点击表面":"启用选面"}</Button>
           {!selectedSurfaceIds.length ? <div className="material-empty">请先启用选面，并点击需要添加材质的表面</div> : <>
             <div className="selected-surface-list">{selectedSurfaceIds.map((surfaceId)=><span key={surfaceId}>{surfaceLabel(shape,surfaceId)}</span>)}</div>
             <div className="projection-switch" aria-label="材质投射方式"><span>投射方式</span><div><Button size="sm" variant={selectedProjection==='cube'?"default":"outline"} aria-pressed={selectedProjection==='cube'} onClick={()=>changeSelectedProjection('cube')}>立方体</Button><Button size="sm" variant={selectedProjection==='uvw'?"default":"outline"} aria-pressed={selectedProjection==='uvw'} onClick={()=>changeSelectedProjection('uvw')}>UVW</Button></div></div>
@@ -827,6 +961,25 @@ export default function ShapeStudio() {
           </>}
           <div className="projection-note"><Grid3X3 size={14}/><span>{selectedProjection==='cube'?"立方体投射依据 X / Y / Z 方向保持纹理尺寸。":"UVW 按模型坐标展开，圆柱侧面会连续环绕。"} PNG 贴花独立叠加并保留透明区域。</span></div>
         </section>
+        {isGarment && <section className="editor-section opening-section" aria-label="西服套真实几何开口">
+          <div className="section-heading"><span><Scissors size={16}/>形体 {selectedIndex+1} 几何开口</span><output>{currentOpenings.length} / 12</output></div>
+          <p>在正面或背面建立真实开口，可透视内部空间；开口边缘会自动生成厚度。</p>
+          <Button className="opening-mode-button" variant={openingPickerEnabled?"default":"outline"} aria-pressed={openingPickerEnabled} onClick={()=>{setOpeningPickerEnabled((enabled)=>!enabled);setMaterialPickerEnabled(false);}}><MousePointer2 size={15}/>{openingPickerEnabled?'正在选择开口面':'在画布中选择开口面'}</Button>
+          <div className="opening-surface-switch"><span>目标表面</span><div><Button size="sm" variant={openingSurfaceId==='front'?"default":"outline"} onClick={()=>setOpeningSurface('front')}>正面</Button><Button size="sm" variant={openingSurfaceId==='back'?"default":"outline"} onClick={()=>setOpeningSurface('back')}>背面</Button><Button size="sm" variant={openingSurfaceId==='side'?"default":"outline"} onClick={()=>setOpeningSurface('side')}>侧围</Button></div></div>
+          <div className="opening-shape-grid" aria-label="选择开口形状">
+            {(['rectangle','rounded-rectangle','circle','ellipse'] as OpeningShape[]).map((openingShape)=><Button key={openingShape} size="sm" variant={(selectedOpening?.shape ?? newOpeningShape)===openingShape?'default':'outline'} onClick={()=>chooseOpeningShape(openingShape)}>{openingShapeLabel(openingShape)}</Button>)}
+          </div>
+          <Button className="add-opening-button" disabled={currentOpenings.length>=12} onClick={addOpening}><Plus size={15}/>{currentOpenings.length>=12?'已达到 12 个开口':'新增开口'}</Button>
+          {!!currentOpenings.length && <div className="opening-picker" aria-label="选择要编辑的开口">{currentOpenings.map((opening,index)=><Button key={opening.id} size="sm" variant={selectedOpeningId===opening.id?'default':'outline'} onClick={()=>selectOpening(opening.id)}><span>{index+1}</span>{openingShapeLabel(opening.shape)} · {opening.surfaceId==='front'?'正面':opening.surfaceId==='back'?'背面':'侧围'}</Button>)}</div>}
+          {selectedOpening && <div className="opening-controls">
+              <div className="opening-selected-status"><span className="status-dot"/><div><strong>开口 {currentOpenings.findIndex((opening)=>opening.id===selectedOpening.id)+1} · {openingShapeLabel(selectedOpening.shape)}</strong><small>{selectedOpening.surfaceId==='front'?'正面':selectedOpening.surfaceId==='back'?'背面':'侧围'} · 独立几何裁切</small></div></div>
+            {([['u',selectedOpening.surfaceId==='side'?'侧围环绕位置':'水平位置',8,92],['v',selectedOpening.surfaceId==='side'?'前后位置':'垂直位置',8,92],['width',selectedOpening.shape==='circle'?'直径':selectedOpening.surfaceId==='side'?'开口长度':'开口宽度',5,70],...(selectedOpening.shape==='circle'?[]:[['height',selectedOpening.surfaceId==='side'?'厚向宽度':'开口高度',5,70] as const]),['scale','等比缩放',25,250]] as const).map(([field,label,min,max])=>{const current=Math.round(selectedOpening[field]*100);return <div className="opening-control-row" key={field}><div className="control-heading"><span>{label}</span><label className="value-field texture-value-field"><input type="number" aria-label={`${label}百分比`} min={min} max={max} value={current} onChange={(event)=>changeSelectedOpening(field,decalPercent(Number(event.target.value),min,max))}/><span>%</span></label></div><Slider aria-label={label} min={min} max={max} step={1} value={[current]} onValueChange={([next])=>changeSelectedOpening(field,next/100)}/></div>;})}
+            <div className="opening-control-row"><div className="control-heading"><span>旋转角度</span><label className="value-field texture-value-field"><input type="number" aria-label="开口旋转角度" min={-180} max={180} value={Math.round(selectedOpening.rotation)} onChange={(event)=>changeSelectedOpening('rotation',Math.max(-180,Math.min(180,Number(event.target.value)||0)))}/><span>°</span></label></div><Slider aria-label="开口旋转角度" min={-180} max={180} step={1} value={[selectedOpening.rotation]} onValueChange={([next])=>changeSelectedOpening('rotation',next)}/></div>
+            {selectedOpening.shape==='rounded-rectangle'&&<div className="opening-control-row"><div className="control-heading"><span>圆角大小</span><label className="value-field texture-value-field"><input type="number" aria-label="开口圆角大小" min={0} max={100} value={Math.round(selectedOpening.cornerRadius*100)} onChange={(event)=>changeSelectedOpening('cornerRadius',decalPercent(Number(event.target.value)))}/><span>%</span></label></div><Slider aria-label="开口圆角大小" min={0} max={100} step={1} value={[selectedOpening.cornerRadius*100]} onValueChange={([next])=>changeSelectedOpening('cornerRadius',next/100)}/></div>}
+            <div className="opening-actions"><Button variant="outline" size="sm" disabled={currentOpenings.length>=12} onClick={duplicateSelectedOpening}><Copy size={14}/>复制</Button><Button variant="outline" size="sm" onClick={removeSelectedOpening}><Trash2 size={14}/>删除</Button></div>
+          </div>}
+          <div className="opening-note"><span>内部空间</span><p>开口会裁掉外层面板，并生成深色切口内壁和对侧内层；多个开口保持独立且不会相互穿叠，材质、贴花与 JPG 会同步反映开口。</p></div>
+        </section>}
         {isGarment && <section className="editor-section garment-section" aria-label="西服套弧顶与挂钩">
           <div className="section-heading"><span><Circle size={16}/>形体 {selectedIndex+1} 顶部弧度</span><output>{Math.round(selectedRoundness)}%</output></div>
           <p>连续调整弧顶圆度；宽度与高度变化后仍保持平顺轮廓。</p>
