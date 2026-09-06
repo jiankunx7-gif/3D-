@@ -11,13 +11,12 @@ export function garmentTopY(x: number, roundness: number) {
   return .5 - radius + radius * Math.sqrt(Math.max(0, 1 - normalizedX * normalizedX));
 }
 
-export function garmentHookAnchors(roundness: number, hookCount: number) {
-  const count = Math.max(0, Math.min(6, Math.round(hookCount)));
-  if (!count) return [];
-  return Array.from({ length: count }, (_, index) => {
-    const x = count === 1 ? 0 : -.34 + (index / (count - 1)) * .68;
-    return [x, garmentTopY(x, roundness)] as const;
-  });
+export function garmentBottomY(height: number) {
+  return .5 - Math.max(.5, height);
+}
+
+export function garmentHookAnchor(roundness: number) {
+  return [0, garmentTopY(0, roundness)] as const;
 }
 
 function ribbonSegment(a: Point, b: Point, width: number, depth: number): Face[] {
@@ -41,12 +40,12 @@ function ribbonSegment(a: Point, b: Point, width: number, depth: number): Face[]
 export function garmentFaces(
   dimensions: { width: number; height: number; depth: number; scale: number },
   roundness = 72,
-  hookCount = 0,
 ): Face[] {
   const faces: Face[] = [];
   const segments = 24;
   const shoulderY = garmentTopY(.5, roundness);
-  const outline: [number, number][] = [[-.5, -.5], [.5, -.5], [.5, shoulderY]];
+  const bottomY = garmentBottomY(dimensions.height);
+  const outline: [number, number][] = [[-.5, bottomY], [.5, bottomY], [.5, shoulderY]];
   for (let index = 1; index <= segments; index++) {
     const theta = (index / segments) * Math.PI;
     const x = Math.cos(theta) * .5;
@@ -63,23 +62,27 @@ export function garmentFaces(
     }
   }
 
-  // Optional component: each hook is generated from the current crown and is therefore always attached.
-  for (const [anchorX, anchorY] of garmentHookAnchors(roundness, hookCount)) {
-    const path: Point[] = [[anchorX, anchorY - .004, 0], [anchorX, anchorY + .055, 0]];
-    const radius = .047;
-    const centerY = anchorY + .095;
-    for (let index = 0; index <= 16; index++) {
-      const theta = -Math.PI / 2 + (index / 16) * Math.PI * 1.55;
-      path.push([anchorX + Math.cos(theta) * radius, centerY + Math.sin(theta) * radius, 0]);
-    }
-    for (let index = 1; index < path.length; index++) faces.push(...ribbonSegment(path[index - 1], path[index], .006, .018));
+  // One circular hook is always attached to the crown centre. Height only moves the lower edge.
+  const [anchorX, anchorY] = garmentHookAnchor(roundness);
+  faces.push(...ribbonSegment([anchorX, anchorY - .004, 0], [anchorX, anchorY + .032, 0], .006, .018));
+  const hookRadius = .052;
+  const hookCenterY = anchorY + .083;
+  const hookPath: Point[] = [];
+  for (let index = 0; index <= 24; index++) {
+    const theta = -Math.PI / 2 + (index / 24) * Math.PI * 2;
+    hookPath.push([anchorX + Math.cos(theta) * hookRadius, hookCenterY + Math.sin(theta) * hookRadius, 0]);
   }
+  for (let index = 1; index < hookPath.length; index++) faces.push(...ribbonSegment(hookPath[index - 1], hookPath[index], .006, .018));
 
   const scaleX = .82 * dimensions.width * dimensions.scale;
-  const scaleY = 1.38 * dimensions.height * dimensions.scale;
+  const scaleY = 1.38 * dimensions.scale;
   const scaleZ = .34 * dimensions.depth * dimensions.scale;
+  const hookScale = .82 * dimensions.scale;
+  const hookAnchorY = garmentHookAnchor(roundness)[1];
   return faces.map(({ material, points }) => ({
     material,
-    points: points.map(([x, y, z]) => [x * scaleX, y * scaleY, z * scaleZ] as Point),
+    points: points.map(([x, y, z]) => material === 'hook'
+      ? [x * hookScale, hookAnchorY * scaleY + (y - hookAnchorY) * hookScale, z * hookScale] as Point
+      : [x * scaleX, y * scaleY, z * scaleZ] as Point),
   }));
 }
