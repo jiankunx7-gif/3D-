@@ -23,6 +23,14 @@ export function decalPercent(value: number, minimum = 0, maximum = 100) {
   return Math.max(minimum, Math.min(maximum, Number.isFinite(value) ? value : minimum)) / 100;
 }
 
+export function scaledDecalDimensions(width: number, height: number, scale: number) {
+  const safeScale = Math.max(.1, Math.min(4, Number.isFinite(scale) ? scale : 1));
+  return {
+    width: Math.max(.005, width * safeScale),
+    height: Math.max(.005, height * safeScale),
+  };
+}
+
 export function cloneInstanceMaterials<T>(materials: Record<string,T>, sourceIndex: number, targetIndex: number) {
   const prefix = `${sourceIndex}:`;
   const result = { ...materials };
