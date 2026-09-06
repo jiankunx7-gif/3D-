@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cloneInstanceMaterials, textureSizeFromPercent, updateSurfaceSelection } from '../src/surface-material.ts';
+import { cloneInstanceMaterials, decalPercent, normalizedModelColor, shadedModelColor, textureSizeFromPercent, updateSurfaceSelection } from '../src/surface-material.ts';
 
 test('ordinary click replaces selection and shift click toggles surfaces', () => {
   assert.deepEqual(updateSurfaceSelection(['front'], 'back', false), ['back']);
@@ -21,4 +21,16 @@ test('material-bearing instances clone every assigned surface', () => {
   assert.deepEqual(next['2:front'], material);
   assert.deepEqual(next['2:side'], material);
   assert.equal(next['2:back'], undefined);
+});
+
+test('model colors normalize and preserve predictable surface shading', () => {
+  assert.equal(normalizedModelColor(' #A0b1C2 '), '#a0b1c2');
+  assert.equal(normalizedModelColor('orange'), '#ee6a35');
+  assert.equal(shadedModelColor('#804020', .5), '#402010');
+});
+
+test('decal values entered as percentages are constrained', () => {
+  assert.equal(decalPercent(42), .42);
+  assert.equal(decalPercent(-10), 0);
+  assert.equal(decalPercent(240, 5, 200), 2);
 });
