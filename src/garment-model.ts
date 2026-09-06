@@ -33,6 +33,20 @@ function ribbonSegment(a: Point, b: Point, width: number, depth: number): Face[]
   return faces;
 }
 
+function roundedTip([x, y]: Point, radius: number, depth: number): Face[] {
+  const front = Array.from({ length: 10 }, (_, index) => {
+    const angle = (index / 10) * Math.PI * 2;
+    return [x + Math.cos(angle) * radius, y + Math.sin(angle) * radius, depth] as Point;
+  });
+  const back = front.map(([px, py]) => [px, py, -depth] as Point);
+  const faces: Face[] = [{ material: 'hook', points: front }, { material: 'hook', points: [...back].reverse() }];
+  for (let index = 0; index < front.length; index++) {
+    const next = (index + 1) % front.length;
+    faces.push({ material: 'hook', points: [front[index], front[next], back[next], back[index]] });
+  }
+  return faces;
+}
+
 /**
  * Parametric suit cover rebuilt from the concept silhouette. It does not load or
  * depend on the uploaded OBJ: width, height, thickness, crown and hooks are all live geometry.
@@ -40,6 +54,7 @@ function ribbonSegment(a: Point, b: Point, width: number, depth: number): Face[]
 export function garmentFaces(
   dimensions: { width: number; height: number; depth: number; scale: number },
   roundness = 72,
+  hookEnabled = false,
 ): Face[] {
   const faces: Face[] = [];
   const segments = 24;
@@ -62,17 +77,28 @@ export function garmentFaces(
     }
   }
 
-  // One circular hook is always attached to the crown centre. Height only moves the lower edge.
-  const [anchorX, anchorY] = garmentHookAnchor(roundness);
-  faces.push(...ribbonSegment([anchorX, anchorY - .004, 0], [anchorX, anchorY + .032, 0], .006, .018));
-  const hookRadius = .052;
-  const hookCenterY = anchorY + .083;
-  const hookPath: Point[] = [];
-  for (let index = 0; index <= 24; index++) {
-    const theta = -Math.PI / 2 + (index / 24) * Math.PI * 2;
-    hookPath.push([anchorX + Math.cos(theta) * hookRadius, hookCenterY + Math.sin(theta) * hookRadius, 0]);
+  // Removable open hook based on the supplied reference: straight stem, S transition,
+  // broad upper return and a rounded cap at the left-hand opening.
+  if (hookEnabled) {
+    const [anchorX, anchorY] = garmentHookAnchor(roundness);
+    const hookPath: Point[] = [
+      [anchorX, anchorY - .004, 0],
+      [anchorX, anchorY + .075, 0],
+      [anchorX + .014, anchorY + .12, 0],
+      [anchorX + .058, anchorY + .165, 0],
+    ];
+    const centerX = anchorX;
+    const centerY = anchorY + .225;
+    const radius = .11;
+    const startAngle = -Math.PI * .18;
+    const endAngle = Math.PI * 1.17;
+    for (let index = 0; index <= 30; index++) {
+      const angle = startAngle + (index / 30) * (endAngle - startAngle);
+      hookPath.push([centerX + Math.cos(angle) * radius, centerY + Math.sin(angle) * radius, 0]);
+    }
+    for (let index = 1; index < hookPath.length; index++) faces.push(...ribbonSegment(hookPath[index - 1], hookPath[index], .0065, .019));
+    faces.push(...roundedTip(hookPath[hookPath.length - 1], .011, .021));
   }
-  for (let index = 1; index < hookPath.length; index++) faces.push(...ribbonSegment(hookPath[index - 1], hookPath[index], .006, .018));
 
   const scaleX = .82 * dimensions.width * dimensions.scale;
   const scaleY = 1.38 * dimensions.scale;
