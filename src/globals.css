@@ -200,6 +200,11 @@ button, input { font: inherit; }
 .decal-controls { display: grid; gap: 14px; padding: 3px 2px 0; }
 .decal-control-row { display: grid; gap: 10px; }
 .decal-control-row .control-heading > span { font-size: 9px; }
+.decal-scale-row { margin-top: 2px; padding: 12px 10px 4px; border: 1px solid #ded5ed; border-radius: 6px; background: rgba(250,247,255,.8); }
+.decal-scale-row .control-heading > span { color: #634c84; font-weight: 700; }
+.decal-scale-row .control-heading svg { color: #8062b1; }
+.decal-scale-row .slider-ends { gap: 6px; }
+.decal-scale-row .slider-ends span:nth-child(2) { color: #887a9b; text-align: center; }
 .projection-note { display: flex; align-items: flex-start; gap: 7px; padding-top: 11px; border-top: 1px solid #dce3e8; color: #7a8692; font-size: 8px; line-height: 1.5; }
 .projection-note svg { flex: none; color: #58738a; }
 
