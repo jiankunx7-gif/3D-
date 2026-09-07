@@ -18,7 +18,7 @@ type CanvasProjection = 'perspective' | 'orthographic';
 type OrthographicView = 'front' | 'top' | 'right';
 type TextureMaterial = { src: string; name: string; size: number; projection: ProjectionMode };
 type Decal = { src: string; name: string; u: number; v: number; width: number; height: number; scale: number };
-type ShapeWorkspace = { dimensions: Dimensions; positions: Vec3[]; lidAngles: number[]; crownRoundness: number[]; hookEnabled: boolean[]; hookSizes: number[]; colors: string[]; selectedIndex: number; selectedSurfaceIds: string[]; faceMaterials: Record<string, TextureMaterial>; decals: Record<string, Decal>; openings: GarmentOpening[][]; selectedOpeningId: string | null; openingSurfaceId: 'front' | 'back' | 'side' };
+type ShapeWorkspace = { dimensions: Dimensions; instanceDimensions: Dimensions[]; positions: Vec3[]; lidAngles: number[]; crownRoundness: number[]; hookEnabled: boolean[]; hookSizes: number[]; colors: string[]; selectedIndex: number; selectedSurfaceIds: string[]; faceMaterials: Record<string, TextureMaterial>; decals: Record<string, Decal>; openings: GarmentOpening[][]; selectedOpeningId: string | null; openingSurfaceId: 'front' | 'back' | 'side' };
 type SceneFace = { points: Vec3[]; material: "body" | "lid" | "inside" | "trim" | "hook"; surfaceId: string };
 type InstanceFace = SceneFace & { shape: ShapeType; instanceIndex: number; localPoints: Vec3[] };
 type HitRegion = { shape: ShapeType; index: number; x: number; y: number; radius: number };
@@ -28,6 +28,7 @@ const GROUND_Y = -0.64;
 const MIN_ZOOM = 0.62;
 const MAX_ZOOM_SEARCH = 6;
 const CANVAS_EDGE_PADDING = 12;
+const SHAPE_NORMALIZATION: Record<ShapeType,number> = { box:4, cylinder:4, garment:1 };
 
 const SHAPES = [
   { id: "box" as const, label: "长方体", icon: Box },
@@ -177,10 +178,15 @@ function garmentInteriorFaces(faces: InstanceFace[], openings: GarmentOpening[])
   return result;
 }
 
-function positionedSceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngles: number[], crownRoundness: number[], hookEnabled: boolean[], hookSizes: number[], positions: Vec3[], openingsByInstance: GarmentOpening[][] = []): InstanceFace[] {
-  const fit = shape === 'garment' ? 1 : Math.max(dimensions.width * dimensions.scale, dimensions.height * dimensions.scale, dimensions.depth * dimensions.scale, .1);
+function dimensionsFor(workspace: ShapeWorkspace, index: number) {
+  return workspace.instanceDimensions[index] ?? workspace.dimensions;
+}
+
+function positionedSceneFaces(shape: ShapeType, dimensions: Dimensions, instanceDimensions: Dimensions[], lidAngles: number[], crownRoundness: number[], hookEnabled: boolean[], hookSizes: number[], positions: Vec3[], openingsByInstance: GarmentOpening[][] = []): InstanceFace[] {
   return positions.flatMap(([offsetX, offsetY, offsetZ], instanceIndex) => {
-    const faces = sceneFaces(shape, dimensions, lidAngles[instanceIndex] ?? 0, crownRoundness[instanceIndex] ?? 72, hookEnabled[instanceIndex] ?? false, hookSizes[instanceIndex] ?? 1).map(({ points, material, surfaceId }) => ({
+    const currentDimensions=instanceDimensions[instanceIndex] ?? dimensions;
+    const fit = SHAPE_NORMALIZATION[shape];
+    const faces = sceneFaces(shape, currentDimensions, lidAngles[instanceIndex] ?? 0, crownRoundness[instanceIndex] ?? 72, hookEnabled[instanceIndex] ?? false, hookSizes[instanceIndex] ?? 1).map(({ points, material, surfaceId }) => ({
       material,
       surfaceId,
       shape,
@@ -193,13 +199,13 @@ function positionedSceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle
 }
 
 function groundOffsetFor(shape: ShapeType, dimensions: Dimensions, lidAngle: number) {
-  const fit = shape === 'garment' ? 1 : Math.max(dimensions.width * dimensions.scale, dimensions.height * dimensions.scale, dimensions.depth * dimensions.scale, .1);
+  const fit = SHAPE_NORMALIZATION[shape];
   const lowestPoint = Math.min(...sceneFaces(shape, dimensions, lidAngle).flatMap((face) => face.points.map((point) => point[1]))) / fit;
   return GROUND_Y - lowestPoint;
 }
 
 function localBoundsFor(shape: ShapeType, dimensions: Dimensions, lidAngle: number, roundness: number, hookEnabled: boolean, hookSize = 1): CollisionBounds {
-  const fit = shape === 'garment' ? 1 : Math.max(dimensions.width * dimensions.scale, dimensions.height * dimensions.scale, dimensions.depth * dimensions.scale, .1);
+  const fit = SHAPE_NORMALIZATION[shape];
   const points = sceneFaces(shape, dimensions, lidAngle, roundness, hookEnabled, hookSize).flatMap((face) => face.points);
   return {
     min: ([0, 1, 2] as const).map((axis) => Math.min(...points.map((point) => point[axis])) / fit) as Vec3,
@@ -224,7 +230,7 @@ function inverseRotate([x, y, z]: Vec3, yaw: number, pitch: number): Vec3 {
 function allSceneFaces(workspaces: Record<ShapeType, ShapeWorkspace>) {
   return SHAPES.flatMap(({ id }) => {
     const workspace = workspaces[id];
-    return positionedSceneFaces(id, workspace.dimensions, workspace.lidAngles, workspace.crownRoundness, workspace.hookEnabled, workspace.hookSizes, workspace.positions, workspace.openings);
+    return positionedSceneFaces(id, workspace.dimensions, workspace.instanceDimensions, workspace.lidAngles, workspace.crownRoundness, workspace.hookEnabled, workspace.hookSizes, workspace.positions, workspace.openings);
   });
 }
 
@@ -263,7 +269,7 @@ function sceneObstacles(workspaces: Record<ShapeType, ShapeWorkspace>, excludeSh
   return SHAPES.flatMap(({ id }) => {
     const workspace = workspaces[id];
     return workspace.positions.flatMap((position, index) => id === excludeShape && index === excludeIndex ? [] : [worldBounds(
-      localBoundsFor(id, workspace.dimensions, workspace.lidAngles[index] ?? 0, workspace.crownRoundness[index] ?? 72, workspace.hookEnabled[index] ?? false, workspace.hookSizes[index] ?? 1),
+      localBoundsFor(id, dimensionsFor(workspace,index), workspace.lidAngles[index] ?? 0, workspace.crownRoundness[index] ?? 72, workspace.hookEnabled[index] ?? false, workspace.hookSizes[index] ?? 1),
       position,
     )]);
   });
@@ -273,8 +279,9 @@ function collisionSafePositionInScene(shape: ShapeType, workspaces: Record<Shape
   const workspace = workspaces[shape];
   const current = workspace.positions[index] ?? [0, 0, 0];
   const desired = [...desiredPosition] as Vec3;
-  if (groundEnabled) desired[1] = Math.max(desired[1], groundOffsetFor(shape, workspace.dimensions, workspace.lidAngles[index] ?? 0));
-  const movingBounds = localBoundsFor(shape, workspace.dimensions, workspace.lidAngles[index] ?? 0, workspace.crownRoundness[index] ?? 72, workspace.hookEnabled[index] ?? false, workspace.hookSizes[index] ?? 1);
+  const currentDimensions=dimensionsFor(workspace,index);
+  if (groundEnabled) desired[1] = Math.max(desired[1], groundOffsetFor(shape, currentDimensions, workspace.lidAngles[index] ?? 0));
+  const movingBounds = localBoundsFor(shape, currentDimensions, workspace.lidAngles[index] ?? 0, workspace.crownRoundness[index] ?? 72, workspace.hookEnabled[index] ?? false, workspace.hookSizes[index] ?? 1);
   return resolveCollisionMove(current, desired, movingBounds, sceneObstacles(workspaces, shape, index)) as Vec3;
 }
 
@@ -284,8 +291,9 @@ function separateSceneWorkspaces(workspaces: Record<ShapeType, ShapeWorkspace>, 
   SHAPES.forEach(({ id }) => {
     const workspace = next[id];
     const positions = workspace.positions.map((position, index) => {
-      const localBounds = localBoundsFor(id, workspace.dimensions, workspace.lidAngles[index] ?? 0, workspace.crownRoundness[index] ?? 72, workspace.hookEnabled[index] ?? false, workspace.hookSizes[index] ?? 1);
-      const baseY = groundEnabled ? groundOffsetFor(id, workspace.dimensions, workspace.lidAngles[index] ?? 0) : position[1];
+      const currentDimensions=dimensionsFor(workspace,index);
+      const localBounds = localBoundsFor(id, currentDimensions, workspace.lidAngles[index] ?? 0, workspace.crownRoundness[index] ?? 72, workspace.hookEnabled[index] ?? false, workspace.hookSizes[index] ?? 1);
+      const baseY = groundEnabled ? groundOffsetFor(id, currentDimensions, workspace.lidAngles[index] ?? 0) : position[1];
       let nextPosition = [position[0], Math.max(position[1], baseY), position[2]] as Vec3;
       if (placedBounds.some((bounds) => boundsOverlap(worldBounds(localBounds, nextPosition), bounds))) nextPosition = spawnBeside(localBounds, placedBounds, baseY, position[2]) as Vec3;
       placedBounds.push(worldBounds(localBounds, nextPosition));
@@ -658,9 +666,9 @@ export default function ShapeStudio() {
   const [shape, setShape] = useState<ShapeType>("garment");
   const isGarment = shape === "garment";
   const [workspaces, setWorkspaces] = useState<Record<ShapeType, ShapeWorkspace>>({
-    garment: { dimensions: { width: 1, height: 1, depth: 1, scale: 1 }, positions: [], lidAngles: [], crownRoundness: [], hookEnabled: [], hookSizes: [], colors: [], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {}, decals: {}, openings:[], selectedOpeningId:null, openingSurfaceId:'front' },
-    box: { dimensions: { width: 4, height: 3, depth: 2.5, scale: 1 }, positions: [], lidAngles: [], crownRoundness: [], hookEnabled: [], hookSizes: [], colors: [], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {}, decals: {}, openings:[], selectedOpeningId:null, openingSurfaceId:'front' },
-    cylinder: { dimensions: { width: 3, height: 4, depth: 3, scale: 1 }, positions: [], lidAngles: [], crownRoundness: [], hookEnabled: [], hookSizes: [], colors: [], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {}, decals: {}, openings:[], selectedOpeningId:null, openingSurfaceId:'front' },
+    garment: { dimensions: { width: 1, height: 1, depth: 1, scale: 1 }, instanceDimensions:[], positions: [], lidAngles: [], crownRoundness: [], hookEnabled: [], hookSizes: [], colors: [], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {}, decals: {}, openings:[], selectedOpeningId:null, openingSurfaceId:'front' },
+    box: { dimensions: { width: 4, height: 3, depth: 2.5, scale: 1 }, instanceDimensions:[], positions: [], lidAngles: [], crownRoundness: [], hookEnabled: [], hookSizes: [], colors: [], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {}, decals: {}, openings:[], selectedOpeningId:null, openingSurfaceId:'front' },
+    cylinder: { dimensions: { width: 3, height: 4, depth: 3, scale: 1 }, instanceDimensions:[], positions: [], lidAngles: [], crownRoundness: [], hookEnabled: [], hookSizes: [], colors: [], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {}, decals: {}, openings:[], selectedOpeningId:null, openingSurfaceId:'front' },
   });
   const [rotation, setRotation] = useState({ yaw: -.62, pitch: -.38 });
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -670,11 +678,14 @@ export default function ShapeStudio() {
   const [groundEnabled, setGroundEnabled] = useState(false);
   const [focalLength, setFocalLength] = useState(35);
   const [captureStatus, setCaptureStatus] = useState(false);
+  const [threeViewEnabled, setThreeViewEnabled] = useState(false);
   const [materialPickerEnabled, setMaterialPickerEnabled] = useState(false);
   const [openingPickerEnabled, setOpeningPickerEnabled] = useState(false);
   const [newMaterialProjection, setNewMaterialProjection] = useState<ProjectionMode>('cube');
   const [newOpeningShape, setNewOpeningShape] = useState<OpeningShape>('rounded-rectangle');
-  const { dimensions, positions, lidAngles, crownRoundness, hookEnabled, hookSizes, colors, selectedIndex, selectedSurfaceIds, faceMaterials, decals, openings, selectedOpeningId, openingSurfaceId } = workspaces[shape];
+  const activeWorkspace=workspaces[shape];
+  const { positions, lidAngles, crownRoundness, hookEnabled, hookSizes, colors, selectedIndex, selectedSurfaceIds, faceMaterials, decals, openings, selectedOpeningId, openingSurfaceId } = activeWorkspace;
+  const dimensions=dimensionsFor(activeWorkspace,selectedIndex);
   const quantity = positions.length;
   const totalQuantity = SHAPES.reduce((sum, item) => sum + workspaces[item.id].positions.length, 0);
   const hasSelectedModel = quantity > 0;
@@ -711,13 +722,17 @@ export default function ShapeStudio() {
   const changeDimension = useCallback((key: keyof Dimensions, value: number) => {
     setWorkspaces((current) => {
       const workspace = current[shape];
-      const nextDimensions = { ...workspace.dimensions, [key]: value };
-      const resized = { ...workspace, dimensions: nextDimensions, positions: workspace.positions.map(([x,y,z], index) => {
-        if (!groundEnabled) return [x,y,z] as Vec3;
-        const oldGroundY = groundOffsetFor(shape, workspace.dimensions, workspace.lidAngles[index] ?? 0);
-        const nextGroundY = groundOffsetFor(shape, nextDimensions, workspace.lidAngles[index] ?? 0);
-        return [x, Math.abs(y-oldGroundY)<.02 ? nextGroundY : Math.max(y,nextGroundY), z] as Vec3;
-      }) };
+      const targetIndex=workspace.selectedIndex;
+      const previousDimensions=dimensionsFor(workspace,targetIndex);
+      const nextDimensions = { ...previousDimensions, [key]: value };
+      const resized = { ...workspace,
+        instanceDimensions:workspace.instanceDimensions.map((item,index)=>index===targetIndex?nextDimensions:item),
+        positions: workspace.positions.map(([x,y,z], index) => {
+          if (!groundEnabled || index!==targetIndex) return [x,y,z] as Vec3;
+          const oldGroundY = groundOffsetFor(shape, previousDimensions, workspace.lidAngles[index] ?? 0);
+          const nextGroundY = groundOffsetFor(shape, nextDimensions, workspace.lidAngles[index] ?? 0);
+          return [x, Math.abs(y-oldGroundY)<.02 ? nextGroundY : Math.max(y,nextGroundY), z] as Vec3;
+        }) };
       return separateSceneWorkspaces({ ...current, [shape]: resized }, groundEnabled);
     });
   }, [shape, groundEnabled]);
@@ -745,14 +760,15 @@ export default function ShapeStudio() {
       const index = workspace.positions.length;
       const lidAngle = 0;
       const roundness = targetShape === 'garment' ? 72 : 0;
-      const localBounds = localBoundsFor(targetShape, workspace.dimensions, lidAngle, roundness, false, 1);
-      const baseY = groundEnabled ? groundOffsetFor(targetShape, workspace.dimensions, lidAngle) : 0;
+      const newDimensions={ ...(index ? dimensionsFor(workspace,workspace.selectedIndex) : workspace.dimensions) };
+      const localBounds = localBoundsFor(targetShape, newDimensions, lidAngle, roundness, false, 1);
+      const baseY = groundEnabled ? groundOffsetFor(targetShape, newDimensions, lidAngle) : 0;
       const position = spawnBeside(localBounds, sceneObstacles(current), baseY, 0) as Vec3;
       return {
         ...current,
         [targetShape]: {
           ...workspace,
-          positions:[...workspace.positions,position], lidAngles:[...workspace.lidAngles,lidAngle], crownRoundness:[...workspace.crownRoundness,roundness],
+          instanceDimensions:[...workspace.instanceDimensions,newDimensions], positions:[...workspace.positions,position], lidAngles:[...workspace.lidAngles,lidAngle], crownRoundness:[...workspace.crownRoundness,roundness],
           hookEnabled:[...workspace.hookEnabled,false], hookSizes:[...workspace.hookSizes,1], colors:[...workspace.colors,'#ee6a35'], openings:[...workspace.openings,[]],
           selectedIndex:index, selectedSurfaceIds:[], selectedOpeningId:null,
         },
@@ -762,9 +778,9 @@ export default function ShapeStudio() {
   const toggleGround = () => {
     if (groundEnabled) { setGroundEnabled(false); return; }
     setWorkspaces((current) => {
-      const garment = { ...current.garment, positions: current.garment.positions.map(([x,,z]) => [x, groundOffsetFor("garment", current.garment.dimensions, 0), z] as Vec3) };
-      const box = { ...current.box, positions: current.box.positions.map(([x,,z], index) => [x, groundOffsetFor("box", current.box.dimensions, current.box.lidAngles[index] ?? 0), z] as Vec3) };
-      const cylinder = { ...current.cylinder, positions: current.cylinder.positions.map(([x,,z], index) => [x, groundOffsetFor("cylinder", current.cylinder.dimensions, current.cylinder.lidAngles[index] ?? 0), z] as Vec3) };
+      const garment = { ...current.garment, positions: current.garment.positions.map(([x,,z],index) => [x, groundOffsetFor("garment", dimensionsFor(current.garment,index), current.garment.lidAngles[index] ?? 0), z] as Vec3) };
+      const box = { ...current.box, positions: current.box.positions.map(([x,,z], index) => [x, groundOffsetFor("box", dimensionsFor(current.box,index), current.box.lidAngles[index] ?? 0), z] as Vec3) };
+      const cylinder = { ...current.cylinder, positions: current.cylinder.positions.map(([x,,z], index) => [x, groundOffsetFor("cylinder", dimensionsFor(current.cylinder,index), current.cylinder.lidAngles[index] ?? 0), z] as Vec3) };
       return separateSceneWorkspaces({ garment, box, cylinder }, true);
     });
     setGroundEnabled(true);
@@ -775,12 +791,13 @@ export default function ShapeStudio() {
       const workspace = current[shape];
       if (next <= workspace.positions.length) return { ...current, [shape]: {
           ...workspace,
-          positions: workspace.positions.slice(0, next), lidAngles: workspace.lidAngles.slice(0, next), crownRoundness: workspace.crownRoundness.slice(0, next),
+          instanceDimensions:workspace.instanceDimensions.slice(0,next), positions: workspace.positions.slice(0, next), lidAngles: workspace.lidAngles.slice(0, next), crownRoundness: workspace.crownRoundness.slice(0, next),
           hookEnabled: workspace.hookEnabled.slice(0, next), hookSizes: workspace.hookSizes.slice(0, next), colors: workspace.colors.slice(0, next), openings: workspace.openings.slice(0,next),
           faceMaterials: Object.fromEntries(Object.entries(workspace.faceMaterials).filter(([key]) => Number(key.split(':')[0]) < next)),
           decals: Object.fromEntries(Object.entries(workspace.decals).filter(([key]) => Number(key.split(':')[0]) < next)), selectedIndex: Math.min(next - 1, workspace.selectedIndex), selectedSurfaceIds: [], selectedOpeningId:null,
         } };
       const nextPositions = [...workspace.positions];
+      const nextInstanceDimensions=workspace.instanceDimensions.map((item)=>({ ...item }));
       const nextLidAngles = [...workspace.lidAngles];
       const nextRoundness = [...workspace.crownRoundness];
       const nextHookEnabled = [...workspace.hookEnabled];
@@ -796,17 +813,19 @@ export default function ShapeStudio() {
         const roundness = workspace.crownRoundness[templateIndex] ?? 72;
         const hasHook = workspace.hookEnabled[templateIndex] ?? false;
         const hookSize = workspace.hookSizes[templateIndex] ?? 1;
-        const localBounds = localBoundsFor(shape, workspace.dimensions, lidAngle, roundness, hasHook, hookSize);
+        const templateDimensions={ ...dimensionsFor(workspace,templateIndex) };
+        const localBounds = localBoundsFor(shape, templateDimensions, lidAngle, roundness, hasHook, hookSize);
         const sameShapeObstacles = nextPositions.map((position, obstacleIndex) => worldBounds(
-          localBoundsFor(shape, workspace.dimensions, nextLidAngles[obstacleIndex] ?? 0, nextRoundness[obstacleIndex] ?? 72, nextHookEnabled[obstacleIndex] ?? false, nextHookSizes[obstacleIndex] ?? 1),
+          localBoundsFor(shape, nextInstanceDimensions[obstacleIndex] ?? workspace.dimensions, nextLidAngles[obstacleIndex] ?? 0, nextRoundness[obstacleIndex] ?? 72, nextHookEnabled[obstacleIndex] ?? false, nextHookSizes[obstacleIndex] ?? 1),
           position,
         ));
-        const baseY = groundEnabled ? groundOffsetFor(shape, workspace.dimensions, lidAngle) : 0;
+        const baseY = groundEnabled ? groundOffsetFor(shape, templateDimensions, lidAngle) : 0;
         const otherShapeObstacles = SHAPES.filter(({ id }) => id !== shape).flatMap(({ id }) => {
           const other = current[id];
-          return other.positions.map((position, obstacleIndex) => worldBounds(localBoundsFor(id, other.dimensions, other.lidAngles[obstacleIndex] ?? 0, other.crownRoundness[obstacleIndex] ?? 72, other.hookEnabled[obstacleIndex] ?? false, other.hookSizes[obstacleIndex] ?? 1), position));
+          return other.positions.map((position, obstacleIndex) => worldBounds(localBoundsFor(id, dimensionsFor(other,obstacleIndex), other.lidAngles[obstacleIndex] ?? 0, other.crownRoundness[obstacleIndex] ?? 72, other.hookEnabled[obstacleIndex] ?? false, other.hookSizes[obstacleIndex] ?? 1), position));
         });
         nextPositions.push(spawnBeside(localBounds, [...otherShapeObstacles,...sameShapeObstacles], baseY, 0) as Vec3);
+        nextInstanceDimensions.push(templateDimensions);
         nextLidAngles.push(lidAngle);
         nextRoundness.push(roundness);
         nextHookEnabled.push(hasHook);
@@ -817,7 +836,7 @@ export default function ShapeStudio() {
         nextDecals = cloneInstanceMaterials(nextDecals, templateIndex, index);
         if (index >= 11) break;
       }
-      return { ...current, [shape]: { ...workspace, positions: nextPositions, lidAngles: nextLidAngles, crownRoundness: nextRoundness, hookEnabled: nextHookEnabled, hookSizes: nextHookSizes, colors: nextColors, openings:nextOpenings, faceMaterials: nextFaceMaterials, decals: nextDecals, selectedIndex: workspace.selectedIndex } };
+      return { ...current, [shape]: { ...workspace, instanceDimensions:nextInstanceDimensions, positions: nextPositions, lidAngles: nextLidAngles, crownRoundness: nextRoundness, hookEnabled: nextHookEnabled, hookSizes: nextHookSizes, colors: nextColors, openings:nextOpenings, faceMaterials: nextFaceMaterials, decals: nextDecals, selectedIndex: workspace.selectedIndex } };
     });
   };
   const changePosition = (axis: 0 | 1 | 2, value: number) => {
@@ -833,9 +852,19 @@ export default function ShapeStudio() {
   const resetSelectedPosition = () => setWorkspaces((currentWorkspaces) => {
     const workspace = currentWorkspaces[shape];
     if (!workspace.positions[workspace.selectedIndex]) return currentWorkspaces;
-    const desired = [0, groundEnabled ? groundOffsetFor(shape,workspace.dimensions,workspace.lidAngles[workspace.selectedIndex] ?? 0) : 0, 0] as Vec3;
+    const desired = [0, groundEnabled ? groundOffsetFor(shape,dimensionsFor(workspace,workspace.selectedIndex),workspace.lidAngles[workspace.selectedIndex] ?? 0) : 0, 0] as Vec3;
     const resolved = collisionSafePositionInScene(shape, currentWorkspaces, workspace.selectedIndex, desired, groundEnabled);
     return { ...currentWorkspaces, [shape]: { ...workspace, positions: workspace.positions.map((position, index) => index === workspace.selectedIndex ? resolved : position) } };
+  });
+  const resetSelectedGarmentDimensions = () => setWorkspaces((currentWorkspaces) => {
+    const workspace=currentWorkspaces.garment;
+    const resetDimensions={ width:1,height:1,depth:1,scale:1 };
+    const targetIndex=workspace.selectedIndex;
+    const nextWorkspace={ ...workspace,
+      instanceDimensions:workspace.instanceDimensions.map((item,index)=>index===targetIndex?resetDimensions:item),
+      positions:workspace.positions.map(([x,y,z],index)=>index===targetIndex?[x,groundEnabled?groundOffsetFor('garment',resetDimensions,workspace.lidAngles[index]??0):y,z] as Vec3:[x,y,z] as Vec3),
+    };
+    return separateSceneWorkspaces({ ...currentWorkspaces,garment:nextWorkspace },groundEnabled);
   });
   const removeSelectedModel = () => {
     const removedShape = shape;
@@ -847,7 +876,7 @@ export default function ShapeStudio() {
       const workspace = current[removedShape];
       return { ...current, [removedShape]: {
         ...workspace,
-        positions:workspace.positions.filter((_,index)=>index!==removedIndex), lidAngles:workspace.lidAngles.filter((_,index)=>index!==removedIndex), crownRoundness:workspace.crownRoundness.filter((_,index)=>index!==removedIndex),
+        instanceDimensions:workspace.instanceDimensions.filter((_,index)=>index!==removedIndex), positions:workspace.positions.filter((_,index)=>index!==removedIndex), lidAngles:workspace.lidAngles.filter((_,index)=>index!==removedIndex), crownRoundness:workspace.crownRoundness.filter((_,index)=>index!==removedIndex),
         hookEnabled:workspace.hookEnabled.filter((_,index)=>index!==removedIndex), hookSizes:workspace.hookSizes.filter((_,index)=>index!==removedIndex), colors:workspace.colors.filter((_,index)=>index!==removedIndex), openings:workspace.openings.filter((_,index)=>index!==removedIndex),
         faceMaterials:reindexInstanceRecord(workspace.faceMaterials,removedIndex), decals:reindexInstanceRecord(workspace.decals,removedIndex),
         selectedIndex:Math.max(0,Math.min(removedIndex,workspace.positions.length-2)), selectedSurfaceIds:[], selectedOpeningId:null,
@@ -859,7 +888,7 @@ export default function ShapeStudio() {
   };
   const changeSelectedLid = (angle: number) => setWorkspaces((current) => {
     const workspace=current[shape];
-    const updated={ ...workspace, lidAngles:workspace.lidAngles.map((value,index)=>index===workspace.selectedIndex?angle:value), positions:workspace.positions.map(([x,y,z],index)=>index===workspace.selectedIndex&&groundEnabled?[x,Math.max(y,groundOffsetFor(shape,workspace.dimensions,angle)),z] as Vec3:[x,y,z] as Vec3) };
+    const updated={ ...workspace, lidAngles:workspace.lidAngles.map((value,index)=>index===workspace.selectedIndex?angle:value), positions:workspace.positions.map(([x,y,z],index)=>index===workspace.selectedIndex&&groundEnabled?[x,Math.max(y,groundOffsetFor(shape,dimensionsFor(workspace,index),angle)),z] as Vec3:[x,y,z] as Vec3) };
     return separateSceneWorkspaces({ ...current, [shape]:updated },groundEnabled);
   });
   const changeSelectedRoundness = (roundness: number) => setWorkspaces((current) => {
@@ -1030,7 +1059,7 @@ export default function ShapeStudio() {
         ...workspace,
         lidAngles: workspace.lidAngles.map((value, index) => index === animatedIndex ? nextAngle : value),
         positions: workspace.positions.map(([x,y,z], index) => index === animatedIndex && groundEnabled
-          ? [x, Math.max(y, groundOffsetFor(animatedShape, workspace.dimensions, nextAngle)), z] as Vec3
+          ? [x, Math.max(y, groundOffsetFor(animatedShape, dimensionsFor(workspace,index), nextAngle)), z] as Vec3
           : [x,y,z] as Vec3),
       }));
       if (progress < 1) lidAnimationRef.current = requestAnimationFrame(tick);
@@ -1064,27 +1093,25 @@ export default function ShapeStudio() {
         {SHAPES.map((item) => { const Icon = item.icon; const count=workspaces[item.id].positions.length; return <Button key={item.id} variant="ghost" className={`shape-button ${shape === item.id && count ? "is-active" : ""}`} onClick={() => addShapeInstance(item.id)} aria-label={`添加${item.label}`}><span className="shape-icon"><Icon size={25} strokeWidth={1.55} /></span><span>{item.label}<small>点击添加</small></span><i>{count || <Plus size={12}/>}</i></Button>; })}
       </div><div className="interaction-tip"><MousePointer2 size={18} /><p><strong>左键空白旋转视角</strong><span>中键平移画面 · 滚轮缩放</span></p></div></aside>
       <section className="viewport-panel" aria-label="3D 预览区">
-        <div className="viewport-meta"><div><span className="eyebrow">PERSPECTIVE / {focalLength}mm</span><strong>{totalQuantity ? `混合场景 × ${totalQuantity}` : '空白工作画布'}</strong></div><div className="view-actions"><Button className="capture-button" size="sm" onClick={saveJpg}><Download size={15}/>{captureStatus ? "已保存" : "拍照 JPG"}</Button><Button variant="ghost" size="sm" onClick={toggleGround} aria-pressed={groundEnabled}>{groundEnabled ? <Minus size={15}/> : <Plus size={15}/>} {groundEnabled ? "移除地面" : "添加地面"}</Button><Button variant="ghost" size="sm" onClick={() => setGridVisible((v) => !v)} aria-pressed={gridVisible}><Grid3X3 size={16} />网格</Button><Button variant="ghost" size="sm" onClick={resetView}><Redo2 size={15} />复位</Button></div></div>
-        <div className="viewport-workarea">
+        <div className="viewport-meta"><div><span className="eyebrow">{threeViewEnabled?'FOUR VIEW WORKSPACE':`PERSPECTIVE / ${focalLength}mm`}</span><strong>{totalQuantity ? `混合场景 × ${totalQuantity}` : '空白工作画布'}</strong></div><div className="view-actions"><Button className="capture-button" size="sm" onClick={saveJpg}><Download size={15}/>{captureStatus ? "已保存" : "拍照 JPG"}</Button><Button className="three-view-button" variant={threeViewEnabled?'default':'ghost'} size="sm" onClick={()=>setThreeViewEnabled((enabled)=>!enabled)} aria-pressed={threeViewEnabled}><Grid3X3 size={15}/>{threeViewEnabled?'退出三视图':'展开三视图'}</Button><Button variant="ghost" size="sm" onClick={toggleGround} aria-pressed={groundEnabled}>{groundEnabled ? <Minus size={15}/> : <Plus size={15}/>} {groundEnabled ? "移除地面" : "添加地面"}</Button><Button variant="ghost" size="sm" onClick={() => setGridVisible((v) => !v)} aria-pressed={gridVisible}><Grid3X3 size={16} />网格</Button><Button variant="ghost" size="sm" onClick={resetView}><Redo2 size={15} />复位</Button></div></div>
+        <div className={`viewport-workarea ${threeViewEnabled?'is-quad':'is-single'}`}>
         <div className={`canvas-stage ${captureStatus ? "is-captured" : ""}`}><canvas ref={canvasRef} tabIndex={0} aria-label="1比1透视画布，左键空白旋转，中键平移视角，滚轮缩放"
           onPointerDown={(e) => { e.preventDefault(); if(e.button===1){e.currentTarget.setPointerCapture(e.pointerId);pointerRef.current={id:e.pointerId,x:e.clientX,y:e.clientY,action:"pan",objectShape:shape,objectIndex:-1};e.currentTarget.classList.add("is-panning");return;} const rect=e.currentTarget.getBoundingClientRect(); const x=e.clientX-rect.left,y=e.clientY-rect.top; if(openingPickerEnabled){ const openingHit=[...openingRegionsRef.current].reverse().find((region)=>region.shape==='garment'&&pointInPolygon(x,y,region.polygon)); if(openingHit){setShape('garment');selectOpening(openingHit.openingId,openingHit.instanceIndex);return;} const targetFace=[...faceRegionsRef.current].reverse().find((region)=>region.shape==='garment'&&(region.surfaceId==='front'||region.surfaceId==='back'||region.surfaceId==='side')&&pointInPolygon(x,y,region.polygon)&&!region.holes?.some((hole)=>pointInPolygon(x,y,hole))); if(targetFace){setShape('garment');updateWorkspace('garment',(workspace)=>({...workspace,selectedIndex:targetFace.instanceIndex,openingSurfaceId:targetFace.surfaceId as 'front'|'back'|'side',selectedOpeningId:null,selectedSurfaceIds:[]}));return;} } const faceHit=materialPickerEnabled?[...faceRegionsRef.current].reverse().find((region)=>pointInPolygon(x,y,region.polygon)&&!region.holes?.some((hole)=>pointInPolygon(x,y,hole))):undefined; if(faceHit){ const append=e.shiftKey; setShape(faceHit.shape); updateWorkspace(faceHit.shape,(workspace)=>({...workspace,selectedIndex:faceHit.instanceIndex,selectedSurfaceIds:updateSurfaceSelection(workspace.selectedIndex===faceHit.instanceIndex?workspace.selectedSurfaceIds:[],faceHit.surfaceId,append)})); return; } const hit=[...hitRegionsRef.current].sort((a,b)=>a.radius-b.radius).find((region)=>Math.hypot(x-region.x,y-region.y)<=region.radius+10); e.currentTarget.setPointerCapture(e.pointerId); if(hit)selectInstance(hit.shape,hit.index); pointerRef.current = { id:e.pointerId, x:e.clientX, y:e.clientY, action:hit?"object":"camera", objectShape:hit?.shape ?? shape, objectIndex:hit?.index ?? -1 }; e.currentTarget.classList.add(hit?"is-moving-object":"is-dragging"); }}
           onPointerMove={(e) => { const p=pointerRef.current; if(!p||p.id!==e.pointerId)return; const dx=e.clientX-p.x,dy=e.clientY-p.y; if(p.action==="camera")setRotation((r)=>({yaw:r.yaw+dx*.009,pitch:Math.max(-1.48,Math.min(1.48,r.pitch+dy*.009))})); else if(p.action==="pan")setPan((current)=>({x:current.x+dx,y:current.y+dy})); else { const canvas=e.currentTarget; const factor=2.45/(Math.max(220,Math.min(canvas.clientWidth,canvas.clientHeight))*zoom); const [wx,wy,wz]=inverseRotate([dx*factor,-dy*factor,0],rotation.yaw,rotation.pitch); setWorkspaces((currentWorkspaces)=>{ const workspace=currentWorkspaces[p.objectShape]; const current=workspace.positions[p.objectIndex]; if(!current)return currentWorkspaces; const desired=[current[0]+wx,current[1]+wy,current[2]+wz] as Vec3; const resolved=collisionSafePositionInScene(p.objectShape,currentWorkspaces,p.objectIndex,desired,groundEnabled); return { ...currentWorkspaces, [p.objectShape]:{ ...workspace, positions:workspace.positions.map((position,index)=>index===p.objectIndex?resolved:position) } }; }); } pointerRef.current={...p,x:e.clientX,y:e.clientY}; }}
           onPointerUp={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object","is-panning"); }} onPointerCancel={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object","is-panning"); }} onAuxClick={(e)=>e.preventDefault()} onDoubleClick={resetView}
           onWheel={(e) => { e.preventDefault(); setZoom((z)=>Math.max(Math.min(MIN_ZOOM,zoomLimit * .5),Math.min(zoomLimit,z-e.deltaY*.0015))); }}
           onKeyDown={(e) => { if(e.key==="ArrowLeft")setRotation((r)=>({...r,yaw:r.yaw-.08})); if(e.key==="ArrowRight")setRotation((r)=>({...r,yaw:r.yaw+.08})); if(e.key==="ArrowUp")setRotation((r)=>({...r,pitch:Math.max(-1.48,r.pitch-.08)})); if(e.key==="ArrowDown")setRotation((r)=>({...r,pitch:Math.min(1.48,r.pitch+.08)})); if(e.key==="0")resetView(); }} />
-          <div className="canvas-ratio-label">1:1 极限画布</div>{!totalQuantity && <div className="empty-canvas-state"><span><Plus size={22}/></span><strong>空白工作画布</strong><small>点击左侧任意图形，将模型添加到这里</small></div>}{hasSelectedModel && <><div className="dimension-badge badge-width"><span>W</span>{dimensionLabel(dimensions.width)}</div><div className="dimension-badge badge-height"><span>H</span>{dimensionLabel(dimensions.height)}</div><div className="dimension-badge badge-depth"><span>D</span>{dimensionLabel(dimensions.depth)}</div></>}<div className="camera-readout"><Camera size={14}/><span>{focalLength}mm · {fieldOfView}°</span></div><div className="zoom-readout"><Rotate3D size={15} /><span>{Math.round(zoom*100)}% / 极限 {Math.round(zoomLimit*100)}%</span></div><div className="capture-confirmation"><Camera size={16}/>JPG 已保存</div>
+          {threeViewEnabled?<div className="ortho-title perspective-title"><span>PERSPECTIVE</span><strong>透视视图</strong></div>:<div className="canvas-ratio-label">1:1 极限画布</div>}{!totalQuantity && <div className="empty-canvas-state"><span><Plus size={22}/></span><strong>空白工作画布</strong><small>点击左侧任意图形，将模型添加到这里</small></div>}{hasSelectedModel && <><div className="dimension-badge badge-width"><span>W</span>{dimensionLabel(dimensions.width)}</div><div className="dimension-badge badge-height"><span>H</span>{dimensionLabel(dimensions.height)}</div><div className="dimension-badge badge-depth"><span>D</span>{dimensionLabel(dimensions.depth)}</div></>}<div className="camera-readout"><Camera size={14}/><span>{focalLength}mm · {fieldOfView}°</span></div><div className="zoom-readout"><Rotate3D size={15} /><span>{Math.round(zoom*100)}% / 极限 {Math.round(zoomLimit*100)}%</span></div><div className="capture-confirmation"><Camera size={16}/>JPG 已保存</div>
           {groundEnabled && <div className="ground-status"><span className="status-dot"/>固定地面 · 防穿透</div>}
         </div>
-        <div className="ortho-rail" aria-label="三视图定位区">
-          {(['front','top','right'] as OrthographicView[]).map((view)=><OrthographicViewport key={view} view={view} selectedShape={shape} workspaces={workspaces} gridVisible={gridVisible} groundEnabled={groundEnabled} onSelect={selectInstance} onMove={moveInstanceByDelta}/>) }
+        {threeViewEnabled&&(['front','top','right'] as OrthographicView[]).map((view)=><OrthographicViewport key={view} view={view} selectedShape={shape} workspaces={workspaces} gridVisible={gridVisible} groundEnabled={groundEnabled} onSelect={selectInstance} onMove={moveInstanceByDelta}/>) }
         </div>
-        </div>
-        <div className="view-presets" aria-label="视角预设"><span>快速视角</span><Button variant="outline" size="sm" onClick={()=>setView("front")}>正面</Button><Button variant="outline" size="sm" onClick={()=>setView("top")}>顶面</Button><Button variant="outline" size="sm" onClick={()=>setView("iso")}>等轴</Button></div>
+        {!threeViewEnabled&&<div className="view-presets" aria-label="视角预设"><span>快速视角</span><Button variant="outline" size="sm" onClick={()=>setView("front")}>正面</Button><Button variant="outline" size="sm" onClick={()=>setView("top")}>顶面</Button><Button variant="outline" size="sm" onClick={()=>setView("iso")}>等轴</Button></div>}
       </section>
       <aside className="control-panel" aria-label="模型与摄像机控制"><div className="panel-title"><span>02</span><div><strong>{hasSelectedModel?'调整模型':'等待添加'}</strong><small>{hasSelectedModel?'编辑当前选中模型':'画布当前为空'}</small></div></div>{!hasSelectedModel?<div className="empty-control-state"><span><Plus size={20}/></span><strong>还没有可编辑的模型</strong><p>从左侧选择长方体、圆柱体或西服套，即可添加到同一个工作画布。</p></div>:<><div className="controls">
         {isGarment ? <><DimensionControl label="宽度" axis="W" value={Math.round(dimensions.width * 100)} unit="%" onChange={(v)=>changeDimension("width",v / 100)} /><DimensionControl label="底部高度" axis="H" value={Math.round(dimensions.height * 100)} unit="%" minValue={50} onChange={(v)=>changeDimension("height",v / 100)} /><DimensionControl label="厚度" axis="D" value={Math.round(dimensions.depth * 100)} unit="%" onChange={(v)=>changeDimension("depth",v / 100)} /></> : <><DimensionControl label="长度" axis="W" value={dimensions.width} unit="cm" onChange={(v)=>changeDimension("width",v)} /><DimensionControl label="高度" axis="H" value={dimensions.height} unit="cm" onChange={(v)=>changeDimension("height",v)} /><DimensionControl label="深度" axis="D" value={dimensions.depth} unit="cm" onChange={(v)=>changeDimension("depth",v)} /></>}
-        <div className="scale-control"><div className="control-heading"><span><Maximize2 size={16}/>整体大小</span><output>{dimensions.scale.toFixed(1)}×</output></div><Slider aria-label="整体大小" min={.5} max={2} step={.1} value={[dimensions.scale]} onValueChange={([next])=>changeDimension("scale",next)} /><div className="slider-ends"><span>0.5×</span><span>2.0×</span></div></div>
-      </div><div className="size-summary"><span>{isGarment ? "宽 × 底部高度 × 厚 · 相对比例" : "当前尺寸"}</span><strong>{dimensionLabel(dimensions.width)} × {dimensionLabel(dimensions.height)} × {dimensionLabel(dimensions.depth)}</strong><small>{isGarment ? "高度只改变底边 · 弧顶与可选挂钩保持原形" : `单位：厘米 · 比例 ${dimensions.scale.toFixed(1)}×`}</small>{isGarment && <Button variant="secondary" size="sm" onClick={()=>updateWorkspace("garment", (workspace)=>({...workspace, dimensions:{width:1,height:1,depth:1,scale:1}, positions:workspace.positions.map(([x,y,z])=>[x, groundEnabled ? Math.max(y, -.04) : y,z] as Vec3)}))}>恢复初始比例</Button>}</div>
+        <div className="scale-control"><div className="control-heading"><span><Maximize2 size={16}/>当前模型等比缩放</span><output>{dimensions.scale.toFixed(1)}×</output></div><Slider aria-label="当前模型等比缩放" min={.5} max={2} step={.1} value={[dimensions.scale]} onValueChange={([next])=>changeDimension("scale",next)} /><div className="slider-ends"><span>0.5× 缩小</span><span>2.0× 放大</span></div></div>
+      </div><div className="size-summary"><span>{isGarment ? "宽 × 底部高度 × 厚 · 当前模型" : "当前选中模型尺寸"}</span><strong>{dimensionLabel(dimensions.width)} × {dimensionLabel(dimensions.height)} × {dimensionLabel(dimensions.depth)}</strong><small>{isGarment ? `形体 ${selectedIndex+1} · 高度只改变底边 · 等比 ${dimensions.scale.toFixed(1)}×` : `形体 ${selectedIndex+1} · 单位：厘米 · 等比 ${dimensions.scale.toFixed(1)}×`}</small>{isGarment && <Button variant="secondary" size="sm" onClick={resetSelectedGarmentDimensions}>恢复当前模型比例</Button>}</div>
         <section className="editor-section instance-section" aria-label="数量与自由摆放">
           <div className="section-heading"><span><Copy size={16}/>数量与自由摆放</span><output>{quantity} 个</output></div>
           <div className="quantity-stepper"><Button variant="outline" size="icon" aria-label="减少数量" disabled={quantity<=1} onClick={()=>changeQuantity(quantity-1)}><Minus size={14}/></Button><strong>{quantity}</strong><Button variant="outline" size="icon" aria-label="增加数量" disabled={quantity>=12} onClick={()=>changeQuantity(quantity+1)}><Plus size={14}/></Button></div>

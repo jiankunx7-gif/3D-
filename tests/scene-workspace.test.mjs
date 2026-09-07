@@ -32,11 +32,14 @@ test('selected models use a solid colour tint without a circular marquee', () =>
   assert.doesNotMatch(source, /ctx\.arc\(selected\.x/);
 });
 
-test('perspective workspace includes three synchronized orthographic positioning views', () => {
+test('three-view button toggles a four-way perspective and orthographic workspace', () => {
   assert.match(source, /front: \{ label:'正视图'.*axes:'X \/ Y'/);
   assert.match(source, /top: \{ label:'顶视图'.*axes:'X \/ Z'/);
   assert.match(source, /right: \{ label:'右视图'.*axes:'Z \/ Y'/);
   assert.match(source, /canvasProjection === 'orthographic'/);
+  assert.match(source, /setThreeViewEnabled\(\(enabled\)=>!enabled\)/);
+  assert.match(source, /threeViewEnabled\?'退出三视图':'展开三视图'/);
+  assert.match(source, /threeViewEnabled\?'is-quad':'is-single'/);
   assert.match(source, /\(\['front','top','right'\] as OrthographicView\[\]\)/);
 });
 
@@ -44,4 +47,12 @@ test('orthographic dragging changes only the two visible axes and keeps collisio
   assert.match(source, /view==='front'\?\[horizontal,vertical,0\]:view==='top'\?\[horizontal,0,vertical\]:\[0,vertical,horizontal\]/);
   assert.match(source, /moveInstanceByDelta/);
   assert.match(source, /collisionSafePositionInScene\(targetShape,currentWorkspaces,targetIndex,desired,groundEnabled\)/);
+});
+
+test('every model keeps independent dimensions and uniform canvas scale', () => {
+  assert.match(source, /instanceDimensions: Dimensions\[\]/);
+  assert.match(source, /instanceDimensions:workspace\.instanceDimensions\.map\(\(item,index\)=>index===targetIndex\?nextDimensions:item\)/);
+  assert.match(source, /instanceDimensions:\[\.\.\.workspace\.instanceDimensions,newDimensions\]/);
+  assert.match(source, /const fit = SHAPE_NORMALIZATION\[shape\]/);
+  assert.match(source, /当前模型等比缩放/);
 });

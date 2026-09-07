@@ -71,8 +71,11 @@ button, input { font: inherit; }
 .view-actions button[aria-pressed="true"] { color: var(--accent-deep); background: #fff1e9; }
 .view-actions .capture-button { background: var(--accent); color: white; padding-inline: 12px; box-shadow: 0 5px 14px rgba(217,81,29,.18); }
 .view-actions .capture-button:hover { background: var(--accent-deep); color: white; }
-.viewport-workarea { width: min(100%, calc(100vh - 39px)); min-width: 0; flex: none; align-self: center; display: grid; grid-template-columns: minmax(0,1fr) 156px; gap: 10px; }
-.canvas-stage { width: 100%; aspect-ratio: 1 / 1; flex: none; position: relative; overflow: hidden; border: 1px solid rgba(180,189,198,.72); border-radius: 9px; background: #f7f8f9; box-shadow: 0 14px 38px rgba(34,44,56,.07), inset 0 0 0 1px rgba(255,255,255,.62); }
+.view-actions .three-view-button[aria-pressed="true"] { color: white; background: var(--ink); }
+.viewport-workarea { width: min(100%, calc(100vh - 205px)); min-width: 0; aspect-ratio: 1 / 1; flex: none; align-self: center; }
+.viewport-workarea.is-single { display: block; }
+.viewport-workarea.is-quad { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-rows: repeat(2,minmax(0,1fr)); gap: 8px; }
+.canvas-stage { width: 100%; height: 100%; min-height: 0; flex: none; position: relative; overflow: hidden; border: 1px solid rgba(180,189,198,.72); border-radius: 9px; background: #f7f8f9; box-shadow: 0 14px 38px rgba(34,44,56,.07), inset 0 0 0 1px rgba(255,255,255,.62); }
 .canvas-stage::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: white; opacity: 0; z-index: 4; }
 .canvas-stage.is-captured::after { animation: camera-flash .34s ease-out; }
 .canvas-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; outline: none; }
@@ -80,7 +83,6 @@ button, input { font: inherit; }
 .canvas-stage canvas.is-moving-object { cursor: move; }
 .canvas-stage canvas.is-panning { cursor: all-scroll; }
 .canvas-stage canvas:focus-visible { box-shadow: inset 0 0 0 2px rgba(238,106,53,.5); border-radius: 8px; }
-.ortho-rail { min-width: 0; display: grid; grid-template-rows: repeat(3,minmax(0,1fr)); gap: 10px; }
 .ortho-card { min-height: 0; position: relative; overflow: hidden; border: 1px solid rgba(180,189,198,.72); border-radius: 8px; background: #f7f8f9; box-shadow: 0 8px 20px rgba(34,44,56,.05), inset 0 0 0 1px rgba(255,255,255,.58); }
 .ortho-card canvas { position: absolute; inset: 0; width: 100%; height: 100%; outline: 0; cursor: crosshair; touch-action: none; }
 .ortho-card canvas.is-moving-object { cursor: move; }
@@ -91,6 +93,9 @@ button, input { font: inherit; }
 .ortho-title strong { color: #4e5b69; font-size: 9px; line-height: 1; }
 .ortho-axes { position: absolute; right: 7px; top: 7px; z-index: 2; padding: 5px 6px; border-radius: 5px; color: #72808f; background: rgba(238,242,245,.82); font: 700 8px/1 monospace; pointer-events: none; }
 .ortho-help { position: absolute; right: 7px; bottom: 6px; z-index: 2; color: #929ca7; font-size: 8px; pointer-events: none; }
+.perspective-title { left: 7px; top: 7px; }
+.viewport-workarea.is-quad .dimension-badge { display: none; }
+.viewport-workarea.is-quad .camera-readout, .viewport-workarea.is-quad .zoom-readout { bottom: 6px; font-size: 8px; }
 .canvas-ratio-label { position: absolute; left: 8px; top: 8px; z-index: 2; padding: 5px 7px; border: 1px solid rgba(204,211,218,.76); border-radius: 5px; background: rgba(255,255,255,.72); color: #7b8794; font: 700 8px/1 monospace; letter-spacing: .08em; pointer-events: none; }
 .empty-canvas-state { position: absolute; left: 50%; top: 50%; z-index: 2; transform: translate(-50%,-50%); display: grid; justify-items: center; gap: 8px; color: #667483; text-align: center; pointer-events: none; }
 .empty-canvas-state > span { width: 44px; height: 44px; display: grid; place-items: center; border: 1px dashed #c7d0d8; border-radius: 50%; color: var(--accent-deep); background: rgba(255,255,255,.72); }
@@ -263,7 +268,7 @@ button, input { font: inherit; }
 
 @media (max-width: 980px) {
   .workspace { grid-template-columns: 190px minmax(380px,1fr); }
-  .viewport-workarea { grid-template-columns: minmax(0,1fr) 132px; width: min(100%, calc(100vh - 63px)); }
+  .viewport-workarea { width: min(100%, calc(100vh - 205px)); }
   .control-panel { grid-column: 1/-1; border-left: 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: 150px 1fr 220px; gap: 26px; align-items: start; max-height: none; overflow: visible; }
   .control-panel .panel-title { margin: 0; }.controls { grid-template-columns: repeat(4,1fr); gap: 22px; }.scale-control { border: 0; padding: 0; }.size-summary { margin: 0; }
   .control-panel .instance-section { grid-column: 1; margin-top: 0; }.control-panel .camera-section { grid-column: 2; margin-top: 0; }.control-panel .lid-section, .control-panel .garment-section { grid-column: 3; margin-top: 0; }
@@ -272,7 +277,7 @@ button, input { font: inherit; }
   .topbar { height: 62px; padding: 0 17px; }.workspace { display: flex; flex-direction: column; }.shape-panel { border-right: 0; border-bottom: 1px solid var(--line); padding: 17px; }
   .shape-panel .panel-title, .interaction-tip { display: none; }.shape-list { display: grid; grid-template-columns: repeat(2,1fr); gap: 6px; }
   .shape-button { height: 50px !important; padding: 0 5px !important; gap: 6px !important; justify-content: center !important; }.shape-button .shape-icon { width: 30px; height: 30px; }.shape-button > span:nth-child(2), .shape-button i { display: none; }
-  .viewport-panel { min-height: 485px; padding: 19px 15px 15px; }.viewport-meta { gap: 8px; }.view-actions { flex-wrap: wrap; justify-content: flex-end; }.view-actions .capture-button { order: -1; }.viewport-workarea { width: 100%; grid-template-columns: 1fr; gap: 8px; }.ortho-rail { height: 112px; grid-template-columns: repeat(3,minmax(0,1fr)); grid-template-rows: 112px; gap: 7px; }.ortho-title { left: 5px; top: 5px; padding: 4px 5px; }.ortho-title strong { font-size: 8px; }.ortho-axes { right: 5px; top: 5px; padding: 4px 5px; font-size: 7px; }.ortho-help { display: none; }.badge-height, .badge-depth { top: 54%; }
+  .viewport-panel { min-height: 485px; padding: 19px 15px 15px; }.viewport-meta { gap: 8px; }.view-actions { flex-wrap: wrap; justify-content: flex-end; }.view-actions .capture-button { order: -1; }.viewport-workarea { width: 100%; }.viewport-workarea.is-quad { gap: 6px; }.ortho-title { left: 5px; top: 5px; padding: 4px 5px; }.ortho-title strong { font-size: 8px; }.ortho-axes { right: 5px; top: 5px; padding: 4px 5px; font-size: 7px; }.ortho-help { display: none; }.badge-height, .badge-depth { top: 54%; }
   .control-panel { display: block; padding: 22px 18px 28px; }.control-panel .panel-title { margin-bottom: 24px; }.controls { grid-template-columns: 1fr; }.scale-control { border-top: 1px solid var(--line); padding-top: 22px; }.size-summary { margin-top: 26px; }.control-panel .editor-section { margin-top: 24px; }
 }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
