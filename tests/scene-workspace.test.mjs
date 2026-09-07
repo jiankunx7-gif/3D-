@@ -75,3 +75,11 @@ test('selected models expose axis gizmos with precise surface picking and camera
   assert.match(source, /event\.button===2 \|\| \(event\.button===0 && event\.altKey\)/);
   assert.match(source, /onContextMenu=\{\(event\)=>event\.preventDefault\(\)\}/);
 });
+
+test('axis gizmos appear only after a direct canvas model click and hide on deselection', () => {
+  assert.match(source, /const \[gizmoVisible, setGizmoVisible\] = useState\(false\)/);
+  assert.match(source, /gizmoVisible && selectedWorkspace\.positions\.length/);
+  assert.match(source, /selectInstance\(faceHit\.shape,faceHit\.instanceIndex\);\s*setGizmoVisible\(true\)/);
+  assert.match(source, /const addShapeInstance[\s\S]*?setGizmoVisible\(false\)/);
+  assert.match(source, /setGizmoVisible\(false\);\s*pointerRef\.current=\{id:event\.pointerId[\s\S]*?action:'camera'/);
+});

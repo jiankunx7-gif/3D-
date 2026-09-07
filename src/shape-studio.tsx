@@ -428,7 +428,7 @@ function fillProjectedDecal(ctx: CanvasRenderingContext2D, image: HTMLImageEleme
   }
 }
 
-function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, faceRegionsRef: React.MutableRefObject<FaceHitRegion[]>, openingRegionsRef: React.MutableRefObject<OpeningHitRegion[]>, gizmoHitRegionsRef: React.MutableRefObject<GizmoHitRegion[]> | null, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, selectedShape: ShapeType, workspaces: Record<ShapeType, ShapeWorkspace>, rotation: { yaw: number; pitch: number }, pan: { x: number; y: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, materialPickerEnabled: boolean, openingPickerEnabled: boolean, canvasProjection: CanvasProjection = 'perspective') {
+function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, faceRegionsRef: React.MutableRefObject<FaceHitRegion[]>, openingRegionsRef: React.MutableRefObject<OpeningHitRegion[]>, gizmoHitRegionsRef: React.MutableRefObject<GizmoHitRegion[]> | null, gizmoVisible: boolean, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, selectedShape: ShapeType, workspaces: Record<ShapeType, ShapeWorkspace>, rotation: { yaw: number; pitch: number }, pan: { x: number; y: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, materialPickerEnabled: boolean, openingPickerEnabled: boolean, canvasProjection: CanvasProjection = 'perspective') {
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = canvas?.parentElement;
@@ -590,7 +590,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
         return { shape:regionShape, index, x: (left + right) / 2, y: (top + bottom) / 2, radius: Math.max(26, Math.hypot(right-left, bottom-top) / 2) };
       });
       hitRegionsRef.current = regions;
-      if (!cleanCapture && canvasProjection === 'perspective' && gizmoHitRegionsRef && selectedWorkspace.positions.length) {
+      if (!cleanCapture && canvasProjection === 'perspective' && gizmoHitRegionsRef && gizmoVisible && selectedWorkspace.positions.length) {
         const selectedFaces=scene.filter((face)=>face.shape===selectedShape&&face.instanceIndex===selectedWorkspace.selectedIndex);
         const selectedPoints=selectedFaces.flatMap((face)=>face.points);
         if (selectedPoints.length) {
@@ -637,7 +637,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
     const observer = new ResizeObserver(() => draw());
     observer.observe(container);
     return () => { observer.disconnect(); drawSceneRef.current = null; };
-  }, [canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, gizmoHitRegionsRef, drawSceneRef, selectedShape, workspaces, rotation, pan, zoom, gridVisible, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled, canvasProjection]);
+  }, [canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, gizmoHitRegionsRef, gizmoVisible, drawSceneRef, selectedShape, workspaces, rotation, pan, zoom, gridVisible, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled, canvasProjection]);
 }
 
 function DimensionControl({ label, axis, value, unit, minValue, maxValue, onChange }: { label: string; axis: string; value: number; unit: string; minValue?: number; maxValue?: number; onChange: (value: number) => void }) {
@@ -673,7 +673,7 @@ function OrthographicViewport({ view, selectedShape, workspaces, gridVisible, gr
   const [zoom, setZoom] = useState(.82);
   const config = ORTHOGRAPHIC_VIEWS[view];
 
-  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, null, drawSceneRef, selectedShape, workspaces, config.rotation, pan, zoom, gridVisible, groundEnabled, 35, false, false, 'orthographic');
+  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, null, false, drawSceneRef, selectedShape, workspaces, config.rotation, pan, zoom, gridVisible, groundEnabled, 35, false, false, 'orthographic');
 
   const reset = () => { setPan({ x:0, y:0 }); setZoom(.82); };
   return <div className="ortho-card" data-view={view}>
@@ -726,6 +726,7 @@ export default function ShapeStudio() {
   const faceRegionsRef = useRef<FaceHitRegion[]>([]);
   const openingRegionsRef = useRef<OpeningHitRegion[]>([]);
   const gizmoHitRegionsRef = useRef<GizmoHitRegion[]>([]);
+  const [gizmoVisible, setGizmoVisible] = useState(false);
   const drawSceneRef = useRef<((cleanCapture?: boolean) => void) | null>(null);
   const pointerRef = useRef<CanvasPointerState | null>(null);
   const lidAnimationRef = useRef<number | null>(null);
@@ -768,7 +769,7 @@ export default function ShapeStudio() {
   const currentOpenings = openings[selectedIndex] ?? [];
   const selectedOpening = currentOpenings.find((opening) => opening.id === selectedOpeningId) ?? null;
   const groundMinY = groundOffsetFor(shape, dimensions, selectedLidAngle);
-  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, gizmoHitRegionsRef, drawSceneRef, shape, workspaces, rotation, pan, zoom, gridVisible, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled);
+  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, gizmoHitRegionsRef, gizmoVisible, drawSceneRef, shape, workspaces, rotation, pan, zoom, gridVisible, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -808,6 +809,7 @@ export default function ShapeStudio() {
     });
   }, [shape, groundEnabled]);
   const selectInstance = (targetShape: ShapeType, index: number) => {
+    setGizmoVisible(false);
     setShape(targetShape);
     updateWorkspace(targetShape, (workspace) => ({ ...workspace, selectedIndex: index, selectedSurfaceIds: [], selectedOpeningId:null }));
   };
@@ -822,6 +824,7 @@ export default function ShapeStudio() {
     });
   },[groundEnabled]);
   const addShapeInstance = (targetShape: ShapeType) => {
+    setGizmoVisible(false);
     setShape(targetShape);
     setMaterialPickerEnabled(false);
     setOpeningPickerEnabled(false);
@@ -938,6 +941,7 @@ export default function ShapeStudio() {
     return separateSceneWorkspaces({ ...currentWorkspaces,garment:nextWorkspace },groundEnabled);
   });
   const removeSelectedModel = () => {
+    setGizmoVisible(false);
     const removedShape = shape;
     const removedIndex = selectedIndex;
     const nextWorkspace = workspaces[removedShape];
@@ -1197,10 +1201,12 @@ export default function ShapeStudio() {
     canvas.setPointerCapture(event.pointerId);
     if (faceHit) {
       selectInstance(faceHit.shape,faceHit.instanceIndex);
+      setGizmoVisible(true);
       pointerRef.current={id:event.pointerId,x:event.clientX,y:event.clientY,action:'object',objectShape:faceHit.shape,objectIndex:faceHit.instanceIndex};
       canvas.classList.add('is-moving-object');
       return;
     }
+    setGizmoVisible(false);
     pointerRef.current={id:event.pointerId,x:event.clientX,y:event.clientY,action:'camera',objectShape:shape,objectIndex:-1};
     canvas.classList.add('is-dragging');
   };
