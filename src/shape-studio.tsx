@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Box, Camera, Circle, Copy, Cylinder, DoorOpen, Download, Grid3X3, ImageIcon, Link2, LocateFixed, Maximize2, Minus, MousePointer2, Move3D, Palette, Plus, Redo2, Rotate3D, Scissors, Shirt, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
@@ -24,6 +24,9 @@ type InstanceFace = SceneFace & { shape: ShapeType; instanceIndex: number; local
 type HitRegion = { shape: ShapeType; index: number; x: number; y: number; radius: number };
 type FaceHitRegion = { shape: ShapeType; instanceIndex: number; surfaceId: string; polygon: { x: number; y: number }[]; holes?: { x: number; y: number }[][] };
 type OpeningHitRegion = { shape: ShapeType; instanceIndex: number; openingId: string; surfaceId: 'front' | 'back' | 'side'; polygon: { x: number; y: number }[] };
+type GizmoAxis = 'x' | 'y' | 'z';
+type GizmoHitRegion = { shape:ShapeType; index:number; axis:GizmoAxis; start:{x:number;y:number}; end:{x:number;y:number}; direction:{x:number;y:number} };
+type CanvasPointerState = { id:number; x:number; y:number; action:'object'|'camera'|'pan'|'gizmo'; objectShape:ShapeType; objectIndex:number; axis?:GizmoAxis; axisScreen?:{x:number;y:number} };
 const GROUND_Y = -0.64;
 const MIN_ZOOM = .28;
 const MAX_ZOOM_SEARCH = 8;
@@ -278,6 +281,14 @@ function clampPanToSquare(pan: { x:number; y:number }, bounds: UnitProjectionBou
   };
 }
 
+function distanceToSegment(point:{x:number;y:number}, start:{x:number;y:number}, end:{x:number;y:number}) {
+  const dx=end.x-start.x, dy=end.y-start.y;
+  const lengthSquared=dx*dx+dy*dy;
+  if (!lengthSquared) return Math.hypot(point.x-start.x,point.y-start.y);
+  const t=Math.max(0,Math.min(1,((point.x-start.x)*dx+(point.y-start.y)*dy)/lengthSquared));
+  return Math.hypot(point.x-(start.x+t*dx),point.y-(start.y+t*dy));
+}
+
 function sceneObstacles(workspaces: Record<ShapeType, ShapeWorkspace>, excludeShape?: ShapeType, excludeIndex = -1) {
   return SHAPES.flatMap(({ id }) => {
     const workspace = workspaces[id];
@@ -417,7 +428,7 @@ function fillProjectedDecal(ctx: CanvasRenderingContext2D, image: HTMLImageEleme
   }
 }
 
-function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, faceRegionsRef: React.MutableRefObject<FaceHitRegion[]>, openingRegionsRef: React.MutableRefObject<OpeningHitRegion[]>, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, selectedShape: ShapeType, workspaces: Record<ShapeType, ShapeWorkspace>, rotation: { yaw: number; pitch: number }, pan: { x: number; y: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, materialPickerEnabled: boolean, openingPickerEnabled: boolean, canvasProjection: CanvasProjection = 'perspective') {
+function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, faceRegionsRef: React.MutableRefObject<FaceHitRegion[]>, openingRegionsRef: React.MutableRefObject<OpeningHitRegion[]>, gizmoHitRegionsRef: React.MutableRefObject<GizmoHitRegion[]> | null, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, selectedShape: ShapeType, workspaces: Record<ShapeType, ShapeWorkspace>, rotation: { yaw: number; pitch: number }, pan: { x: number; y: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, materialPickerEnabled: boolean, openingPickerEnabled: boolean, canvasProjection: CanvasProjection = 'perspective') {
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = canvas?.parentElement;
@@ -579,13 +590,54 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
         return { shape:regionShape, index, x: (left + right) / 2, y: (top + bottom) / 2, radius: Math.max(26, Math.hypot(right-left, bottom-top) / 2) };
       });
       hitRegionsRef.current = regions;
+      if (!cleanCapture && canvasProjection === 'perspective' && gizmoHitRegionsRef && selectedWorkspace.positions.length) {
+        const selectedFaces=scene.filter((face)=>face.shape===selectedShape&&face.instanceIndex===selectedWorkspace.selectedIndex);
+        const selectedPoints=selectedFaces.flatMap((face)=>face.points);
+        if (selectedPoints.length) {
+          const anchor=([0,1,2] as const).map((axis)=>(Math.min(...selectedPoints.map((point)=>point[axis]))+Math.max(...selectedPoints.map((point)=>point[axis])))/2) as Vec3;
+          const origin=project(rotate(anchor,rotation.yaw,rotation.pitch));
+          const axes:[GizmoAxis,Vec3,string,string][]=[
+            ['x',[1,0,0],'#ef4444','X'],
+            ['y',[0,1,0],'#22a35a','Y'],
+            ['z',[0,0,1],'#3478f6','Z'],
+          ];
+          const fallback:Record<GizmoAxis,{x:number;y:number}>={x:{x:1,y:0},y:{x:0,y:-1},z:{x:-.72,y:.69}};
+          gizmoHitRegionsRef.current=axes.map(([axis,vector,color,label])=>{
+            const worldEnd=anchor.map((value,index)=>value+vector[index]*.42) as Vec3;
+            const projectedEnd=project(rotate(worldEnd,rotation.yaw,rotation.pitch));
+            const raw={x:projectedEnd.x-origin.x,y:projectedEnd.y-origin.y};
+            const rawLength=Math.hypot(raw.x,raw.y);
+            const direction=rawLength>.08?{x:raw.x/rawLength,y:raw.y/rawLength}:fallback[axis];
+            const start={x:origin.x+direction.x*9,y:origin.y+direction.y*9};
+            const end={x:origin.x+direction.x*70,y:origin.y+direction.y*70};
+            ctx.save();
+            ctx.lineCap='round';
+            ctx.strokeStyle='rgba(255,255,255,.92)';
+            ctx.lineWidth=6;
+            ctx.beginPath();ctx.moveTo(start.x,start.y);ctx.lineTo(end.x,end.y);ctx.stroke();
+            ctx.strokeStyle=color;
+            ctx.lineWidth=3;
+            ctx.beginPath();ctx.moveTo(start.x,start.y);ctx.lineTo(end.x,end.y);ctx.stroke();
+            const perpendicular={x:-direction.y,y:direction.x};
+            ctx.fillStyle=color;
+            ctx.beginPath();ctx.moveTo(end.x+direction.x*7,end.y+direction.y*7);ctx.lineTo(end.x-direction.x*7+perpendicular.x*5,end.y-direction.y*7+perpendicular.y*5);ctx.lineTo(end.x-direction.x*7-perpendicular.x*5,end.y-direction.y*7-perpendicular.y*5);ctx.closePath();ctx.fill();
+            ctx.font='700 11px ui-sans-serif, system-ui, sans-serif';
+            ctx.textAlign='center';ctx.textBaseline='middle';
+            ctx.fillStyle='#ffffff';ctx.beginPath();ctx.arc(end.x+direction.x*16,end.y+direction.y*16,9,0,Math.PI*2);ctx.fill();
+            ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.stroke();ctx.fillStyle=color;ctx.fillText(label,end.x+direction.x*16,end.y+direction.y*16+.5);
+            ctx.restore();
+            return {shape:selectedShape,index:selectedWorkspace.selectedIndex,axis,start,end:{x:end.x+direction.x*9,y:end.y+direction.y*9},direction};
+          });
+          ctx.save();ctx.fillStyle='#ffffff';ctx.strokeStyle='rgba(55,65,81,.45)';ctx.lineWidth=1.2;ctx.beginPath();ctx.arc(origin.x,origin.y,6,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();
+        } else gizmoHitRegionsRef.current=[];
+      } else if (!cleanCapture && gizmoHitRegionsRef) gizmoHitRegionsRef.current=[];
     };
     drawSceneRef.current = draw;
     draw();
     const observer = new ResizeObserver(() => draw());
     observer.observe(container);
     return () => { observer.disconnect(); drawSceneRef.current = null; };
-  }, [canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, selectedShape, workspaces, rotation, pan, zoom, gridVisible, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled, canvasProjection]);
+  }, [canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, gizmoHitRegionsRef, drawSceneRef, selectedShape, workspaces, rotation, pan, zoom, gridVisible, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled, canvasProjection]);
 }
 
 function DimensionControl({ label, axis, value, unit, minValue, maxValue, onChange }: { label: string; axis: string; value: number; unit: string; minValue?: number; maxValue?: number; onChange: (value: number) => void }) {
@@ -621,7 +673,7 @@ function OrthographicViewport({ view, selectedShape, workspaces, gridVisible, gr
   const [zoom, setZoom] = useState(.82);
   const config = ORTHOGRAPHIC_VIEWS[view];
 
-  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, selectedShape, workspaces, config.rotation, pan, zoom, gridVisible, groundEnabled, 35, false, false, 'orthographic');
+  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, null, drawSceneRef, selectedShape, workspaces, config.rotation, pan, zoom, gridVisible, groundEnabled, 35, false, false, 'orthographic');
 
   const reset = () => { setPan({ x:0, y:0 }); setZoom(.82); };
   return <div className="ortho-card" data-view={view}>
@@ -673,8 +725,9 @@ export default function ShapeStudio() {
   const hitRegionsRef = useRef<HitRegion[]>([]);
   const faceRegionsRef = useRef<FaceHitRegion[]>([]);
   const openingRegionsRef = useRef<OpeningHitRegion[]>([]);
+  const gizmoHitRegionsRef = useRef<GizmoHitRegion[]>([]);
   const drawSceneRef = useRef<((cleanCapture?: boolean) => void) | null>(null);
-  const pointerRef = useRef<{ id: number; x: number; y: number; action: "object" | "camera" | "pan"; objectShape: ShapeType; objectIndex: number } | null>(null);
+  const pointerRef = useRef<CanvasPointerState | null>(null);
   const lidAnimationRef = useRef<number | null>(null);
   const [shape, setShape] = useState<ShapeType>("garment");
   const isGarment = shape === "garment";
@@ -715,7 +768,7 @@ export default function ShapeStudio() {
   const currentOpenings = openings[selectedIndex] ?? [];
   const selectedOpening = currentOpenings.find((opening) => opening.id === selectedOpeningId) ?? null;
   const groundMinY = groundOffsetFor(shape, dimensions, selectedLidAngle);
-  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, shape, workspaces, rotation, pan, zoom, gridVisible, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled);
+  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, gizmoHitRegionsRef, drawSceneRef, shape, workspaces, rotation, pan, zoom, gridVisible, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -1103,20 +1156,92 @@ export default function ShapeStudio() {
       window.setTimeout(() => setCaptureStatus(false), 1500);
     }, "image/jpeg", .94);
   };
+  const beginCanvasPointer = (event:ReactPointerEvent<HTMLCanvasElement>) => {
+    event.preventDefault();
+    const canvas=event.currentTarget;
+    const rect=canvas.getBoundingClientRect();
+    const point={x:event.clientX-rect.left,y:event.clientY-rect.top};
+    if (event.button===1) {
+      canvas.setPointerCapture(event.pointerId);
+      pointerRef.current={id:event.pointerId,x:event.clientX,y:event.clientY,action:'pan',objectShape:shape,objectIndex:-1};
+      canvas.classList.add('is-panning');
+      return;
+    }
+    if (event.button===2 || (event.button===0 && event.altKey)) {
+      canvas.setPointerCapture(event.pointerId);
+      pointerRef.current={id:event.pointerId,x:event.clientX,y:event.clientY,action:'camera',objectShape:shape,objectIndex:-1};
+      canvas.classList.add('is-dragging');
+      return;
+    }
+    if (event.button!==0) return;
+    const gizmoHit=[...gizmoHitRegionsRef.current].sort((a,b)=>distanceToSegment(point,a.start,a.end)-distanceToSegment(point,b.start,b.end)).find((region)=>distanceToSegment(point,region.start,region.end)<=12);
+    if (gizmoHit) {
+      canvas.setPointerCapture(event.pointerId);
+      pointerRef.current={id:event.pointerId,x:event.clientX,y:event.clientY,action:'gizmo',objectShape:gizmoHit.shape,objectIndex:gizmoHit.index,axis:gizmoHit.axis,axisScreen:gizmoHit.direction};
+      canvas.classList.add('is-gizmo-dragging');
+      return;
+    }
+    if (openingPickerEnabled) {
+      const openingHit=[...openingRegionsRef.current].reverse().find((region)=>region.shape==='garment'&&pointInPolygon(point.x,point.y,region.polygon));
+      if (openingHit) { setShape('garment');selectOpening(openingHit.openingId,openingHit.instanceIndex);return; }
+      const targetFace=[...faceRegionsRef.current].reverse().find((region)=>region.shape==='garment'&&(region.surfaceId==='front'||region.surfaceId==='back'||region.surfaceId==='side')&&pointInPolygon(point.x,point.y,region.polygon)&&!region.holes?.some((hole)=>pointInPolygon(point.x,point.y,hole)));
+      if (targetFace) { setShape('garment');updateWorkspace('garment',(workspace)=>({...workspace,selectedIndex:targetFace.instanceIndex,openingSurfaceId:targetFace.surfaceId as 'front'|'back'|'side',selectedOpeningId:null,selectedSurfaceIds:[]}));return; }
+    }
+    const faceHit=[...faceRegionsRef.current].reverse().find((region)=>pointInPolygon(point.x,point.y,region.polygon)&&!region.holes?.some((hole)=>pointInPolygon(point.x,point.y,hole)));
+    if (faceHit && materialPickerEnabled) {
+      const append=event.shiftKey;
+      setShape(faceHit.shape);
+      updateWorkspace(faceHit.shape,(workspace)=>({...workspace,selectedIndex:faceHit.instanceIndex,selectedSurfaceIds:updateSurfaceSelection(workspace.selectedIndex===faceHit.instanceIndex?workspace.selectedSurfaceIds:[],faceHit.surfaceId,append)}));
+      return;
+    }
+    canvas.setPointerCapture(event.pointerId);
+    if (faceHit) {
+      selectInstance(faceHit.shape,faceHit.instanceIndex);
+      pointerRef.current={id:event.pointerId,x:event.clientX,y:event.clientY,action:'object',objectShape:faceHit.shape,objectIndex:faceHit.instanceIndex};
+      canvas.classList.add('is-moving-object');
+      return;
+    }
+    pointerRef.current={id:event.pointerId,x:event.clientX,y:event.clientY,action:'camera',objectShape:shape,objectIndex:-1};
+    canvas.classList.add('is-dragging');
+  };
+  const moveCanvasPointer = (event:ReactPointerEvent<HTMLCanvasElement>) => {
+    const pointer=pointerRef.current;
+    if (!pointer||pointer.id!==event.pointerId) return;
+    const dx=event.clientX-pointer.x,dy=event.clientY-pointer.y;
+    if (pointer.action==='camera') setRotation((current)=>({yaw:current.yaw+dx*.009,pitch:Math.max(-1.48,Math.min(1.48,current.pitch+dy*.009))}));
+    else if (pointer.action==='pan') setPan((current)=>({x:current.x+dx,y:current.y+dy}));
+    else {
+      const canvas=event.currentTarget;
+      const factor=2.45/(Math.max(220,Math.min(canvas.clientWidth,canvas.clientHeight))*zoom);
+      if (pointer.action==='gizmo' && pointer.axis && pointer.axisScreen) {
+        const amount=(dx*pointer.axisScreen.x+dy*pointer.axisScreen.y)*factor;
+        const delta:Vec3=pointer.axis==='x'?[amount,0,0]:pointer.axis==='y'?[0,amount,0]:[0,0,amount];
+        moveInstanceByDelta(pointer.objectShape,pointer.objectIndex,delta);
+      } else {
+        const delta=inverseRotate([dx*factor,-dy*factor,0],rotation.yaw,rotation.pitch);
+        moveInstanceByDelta(pointer.objectShape,pointer.objectIndex,delta);
+      }
+    }
+    pointerRef.current={...pointer,x:event.clientX,y:event.clientY};
+  };
+  const endCanvasPointer = (event:ReactPointerEvent<HTMLCanvasElement>) => {
+    pointerRef.current=null;
+    event.currentTarget.classList.remove('is-dragging','is-moving-object','is-panning','is-gizmo-dragging');
+  };
   const fieldOfView = Math.round((2 * Math.atan(36 / (2 * focalLength)) * 180) / Math.PI);
   return <main className="studio-shell">
     <header className="topbar"><div className="brand"><span className="brand-mark"><Box size={19} strokeWidth={2.2} /></span><div><strong>FORM<span>3D</span></strong><small>形体工作台</small></div></div><div className="topbar-status"><span className="status-dot" />实时预览</div></header>
     <div className="workspace">
       <aside className="shape-panel" aria-label="图形选择"><div className="panel-title"><span>01</span><div><strong>添加图形</strong><small>点击加入同一画布</small></div></div><div className="shape-list">
         {SHAPES.map((item) => { const Icon = item.icon; const count=workspaces[item.id].positions.length; return <Button key={item.id} variant="ghost" className={`shape-button ${shape === item.id && count ? "is-active" : ""}`} onClick={() => addShapeInstance(item.id)} aria-label={`添加${item.label}`}><span className="shape-icon"><Icon size={25} strokeWidth={1.55} /></span><span>{item.label}<small>点击添加</small></span><i>{count || <Plus size={12}/>}</i></Button>; })}
-      </div><div className="interaction-tip"><MousePointer2 size={18} /><p><strong>左键空白旋转视角</strong><span>中键平移画面 · 滚轮缩放</span></p></div></aside>
+      </div><div className="interaction-tip"><MousePointer2 size={18} /><p><strong>点击模型后拖动 XYZ 移动</strong><span>空白左键或右键旋转 · 中键平移 · 滚轮缩放</span></p></div></aside>
       <section className="viewport-panel" aria-label="3D 预览区">
         <div className="viewport-meta"><div><span className="eyebrow">{threeViewEnabled?'FOUR VIEW WORKSPACE':`PERSPECTIVE / ${focalLength}mm`}</span><strong>{totalQuantity ? `混合场景 × ${totalQuantity}` : '空白工作画布'}</strong></div><div className="view-actions"><Button className="capture-button" size="sm" onClick={saveJpg}><Download size={15}/>{captureStatus ? "已保存" : "拍照 JPG"}</Button><Button className="three-view-button" variant={threeViewEnabled?'default':'ghost'} size="sm" onClick={()=>setThreeViewEnabled((enabled)=>!enabled)} aria-pressed={threeViewEnabled}><Grid3X3 size={15}/>{threeViewEnabled?'退出三视图':'展开三视图'}</Button><Button variant="ghost" size="sm" onClick={toggleGround} aria-pressed={groundEnabled}>{groundEnabled ? <Minus size={15}/> : <Plus size={15}/>} {groundEnabled ? "移除地面" : "添加地面"}</Button><Button variant="ghost" size="sm" onClick={() => setGridVisible((visible) => !visible)} aria-pressed={gridVisible}><Grid3X3 size={16} />网格</Button><Button variant="ghost" size="sm" onClick={resetView}><Redo2 size={15} />复位</Button></div></div>
         <div className={`viewport-workarea ${threeViewEnabled?'is-quad':'is-single'}`}>
-        <div className={`canvas-stage ${captureStatus ? "is-captured" : ""}`}><canvas ref={canvasRef} tabIndex={0} aria-label="1比1透视画布，左键空白旋转，中键平移视角，滚轮缩放"
-          onPointerDown={(e) => { e.preventDefault(); if(e.button===1){e.currentTarget.setPointerCapture(e.pointerId);pointerRef.current={id:e.pointerId,x:e.clientX,y:e.clientY,action:"pan",objectShape:shape,objectIndex:-1};e.currentTarget.classList.add("is-panning");return;} const rect=e.currentTarget.getBoundingClientRect(); const x=e.clientX-rect.left,y=e.clientY-rect.top; if(openingPickerEnabled){ const openingHit=[...openingRegionsRef.current].reverse().find((region)=>region.shape==='garment'&&pointInPolygon(x,y,region.polygon)); if(openingHit){setShape('garment');selectOpening(openingHit.openingId,openingHit.instanceIndex);return;} const targetFace=[...faceRegionsRef.current].reverse().find((region)=>region.shape==='garment'&&(region.surfaceId==='front'||region.surfaceId==='back'||region.surfaceId==='side')&&pointInPolygon(x,y,region.polygon)&&!region.holes?.some((hole)=>pointInPolygon(x,y,hole))); if(targetFace){setShape('garment');updateWorkspace('garment',(workspace)=>({...workspace,selectedIndex:targetFace.instanceIndex,openingSurfaceId:targetFace.surfaceId as 'front'|'back'|'side',selectedOpeningId:null,selectedSurfaceIds:[]}));return;} } const faceHit=materialPickerEnabled?[...faceRegionsRef.current].reverse().find((region)=>pointInPolygon(x,y,region.polygon)&&!region.holes?.some((hole)=>pointInPolygon(x,y,hole))):undefined; if(faceHit){ const append=e.shiftKey; setShape(faceHit.shape); updateWorkspace(faceHit.shape,(workspace)=>({...workspace,selectedIndex:faceHit.instanceIndex,selectedSurfaceIds:updateSurfaceSelection(workspace.selectedIndex===faceHit.instanceIndex?workspace.selectedSurfaceIds:[],faceHit.surfaceId,append)})); return; } const hit=[...hitRegionsRef.current].sort((a,b)=>a.radius-b.radius).find((region)=>Math.hypot(x-region.x,y-region.y)<=region.radius+10); e.currentTarget.setPointerCapture(e.pointerId); if(hit)selectInstance(hit.shape,hit.index); pointerRef.current = { id:e.pointerId, x:e.clientX, y:e.clientY, action:hit?"object":"camera", objectShape:hit?.shape ?? shape, objectIndex:hit?.index ?? -1 }; e.currentTarget.classList.add(hit?"is-moving-object":"is-dragging"); }}
-          onPointerMove={(e) => { const p=pointerRef.current; if(!p||p.id!==e.pointerId)return; const dx=e.clientX-p.x,dy=e.clientY-p.y; if(p.action==="camera")setRotation((r)=>({yaw:r.yaw+dx*.009,pitch:Math.max(-1.48,Math.min(1.48,r.pitch+dy*.009))})); else if(p.action==="pan")setPan((current)=>({x:current.x+dx,y:current.y+dy})); else { const canvas=e.currentTarget; const factor=2.45/(Math.max(220,Math.min(canvas.clientWidth,canvas.clientHeight))*zoom); const [wx,wy,wz]=inverseRotate([dx*factor,-dy*factor,0],rotation.yaw,rotation.pitch); setWorkspaces((currentWorkspaces)=>{ const workspace=currentWorkspaces[p.objectShape]; const current=workspace.positions[p.objectIndex]; if(!current)return currentWorkspaces; const desired=[current[0]+wx,current[1]+wy,current[2]+wz] as Vec3; const resolved=collisionSafePositionInScene(p.objectShape,currentWorkspaces,p.objectIndex,desired,groundEnabled); return { ...currentWorkspaces, [p.objectShape]:{ ...workspace, positions:workspace.positions.map((position,index)=>index===p.objectIndex?resolved:position) } }; }); } pointerRef.current={...p,x:e.clientX,y:e.clientY}; }}
-          onPointerUp={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object","is-panning"); }} onPointerCancel={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object","is-panning"); }} onAuxClick={(e)=>e.preventDefault()} onDoubleClick={resetView}
+        <div className={`canvas-stage ${captureStatus ? "is-captured" : ""}`}><canvas ref={canvasRef} tabIndex={0} aria-label="1比1透视画布，点击模型选择，拖动XYZ坐标轴移动，右键或Alt加左键旋转，中键平移，滚轮缩放"
+          onPointerDown={beginCanvasPointer}
+          onPointerMove={moveCanvasPointer}
+          onPointerUp={endCanvasPointer} onPointerCancel={endCanvasPointer} onAuxClick={(event)=>event.preventDefault()} onContextMenu={(event)=>event.preventDefault()} onDoubleClick={resetView}
           onWheel={(e) => { e.preventDefault(); const canvas=e.currentTarget; const bounds=selectedProjectionBounds(workspaces,shape,rotation,focalLength,canvas.clientWidth,canvas.clientHeight); setZoom((current)=>{ const minimum=Math.min(MIN_ZOOM,zoomLimit*.5); const next=Math.max(minimum,Math.min(zoomLimit,current-e.deltaY*.0015)); const anchorX=bounds?(bounds.minX+bounds.maxX)/2:0; const anchorY=bounds?(bounds.minY+bounds.maxY)/2:0; setPan((position)=>clampPanToSquare({x:position.x+anchorX*(current-next),y:position.y+anchorY*(current-next)},bounds,next,canvas.clientWidth,canvas.clientHeight)); return next; }); }}
           onKeyDown={(e) => { if(e.key==="ArrowLeft")setRotation((r)=>({...r,yaw:r.yaw-.08})); if(e.key==="ArrowRight")setRotation((r)=>({...r,yaw:r.yaw+.08})); if(e.key==="ArrowUp")setRotation((r)=>({...r,pitch:Math.max(-1.48,r.pitch-.08)})); if(e.key==="ArrowDown")setRotation((r)=>({...r,pitch:Math.min(1.48,r.pitch+.08)})); if(e.key==="0")resetView(); }} />
           {threeViewEnabled?<div className="ortho-title perspective-title"><span>PERSPECTIVE</span><strong>透视视图</strong></div>:<div className="canvas-ratio-label">1:1 极限画布</div>}{!totalQuantity && <div className="empty-canvas-state"><span><Plus size={22}/></span><strong>空白工作画布</strong><small>点击左侧任意图形，将模型添加到这里</small></div>}{hasSelectedModel && <><div className="dimension-badge badge-width"><span>W</span>{dimensionLabel(dimensions.width)}</div><div className="dimension-badge badge-height"><span>H</span>{dimensionLabel(dimensions.height)}</div><div className="dimension-badge badge-depth"><span>D</span>{dimensionLabel(dimensions.depth)}</div></>}<div className="camera-readout"><Camera size={14}/><span>{focalLength}mm · {fieldOfView}°</span></div><div className="zoom-readout"><Rotate3D size={15} /><span>{Math.round(zoom*100)}% / 极限 {Math.round(zoomLimit*100)}%</span></div><div className="capture-confirmation"><Camera size={16}/>JPG 已保存</div>

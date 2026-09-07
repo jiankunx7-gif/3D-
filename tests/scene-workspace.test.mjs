@@ -20,8 +20,8 @@ test('the fixed circular shadow is absent from canvas and JPG rendering', () => 
 });
 
 test('middle mouse pans the view and reset restores the camera centre', () => {
-  assert.match(source, /e\.button===1/);
-  assert.match(source, /action:"pan"/);
+  assert.match(source, /event\.button===1/);
+  assert.match(source, /action:'pan'/);
   assert.match(source, /setPan\(\(current\)=>\(\{x:current\.x\+dx,y:current\.y\+dy\}\)\)/);
   assert.match(source, /setPan\(\{ x:0, y:0 \}\)/);
 });
@@ -64,4 +64,14 @@ test('canvas zoom remains stable and keeps the selected model inside the 1:1 wor
   assert.match(source, /function clampPanToSquare/);
   assert.match(source, /setGridVisible/);
   assert.match(source, />网格</);
+});
+
+test('selected models expose axis gizmos with precise surface picking and camera override controls', () => {
+  assert.match(source, /type GizmoAxis = 'x' \| 'y' \| 'z'/);
+  assert.match(source, /gizmoHitRegionsRef\.current=axes\.map/);
+  assert.match(source, /action:'gizmo'/);
+  assert.match(source, /pointer\.axis==='x'/);
+  assert.match(source, /faceRegionsRef\.current\]\.reverse\(\)\.find/);
+  assert.match(source, /event\.button===2 \|\| \(event\.button===0 && event\.altKey\)/);
+  assert.match(source, /onContextMenu=\{\(event\)=>event\.preventDefault\(\)\}/);
 });
