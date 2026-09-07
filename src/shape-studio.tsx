@@ -25,8 +25,9 @@ type HitRegion = { shape: ShapeType; index: number; x: number; y: number; radius
 type FaceHitRegion = { shape: ShapeType; instanceIndex: number; surfaceId: string; polygon: { x: number; y: number }[]; holes?: { x: number; y: number }[][] };
 type OpeningHitRegion = { shape: ShapeType; instanceIndex: number; openingId: string; surfaceId: 'front' | 'back' | 'side'; polygon: { x: number; y: number }[] };
 const GROUND_Y = -0.64;
-const FREE_ZOOM_MIN = .28;
-const FREE_ZOOM_MAX = 8;
+const MIN_ZOOM = .28;
+const MAX_ZOOM_SEARCH = 8;
+const CANVAS_EDGE_PADDING = 16;
 const SHAPE_NORMALIZATION: Record<ShapeType,number> = { box:4, cylinder:4, garment:1 };
 
 const SHAPES = [
@@ -233,6 +234,50 @@ function allSceneFaces(workspaces: Record<ShapeType, ShapeWorkspace>) {
   });
 }
 
+type UnitProjectionBounds = { minX:number; maxX:number; minY:number; maxY:number };
+
+function selectedProjectionBounds(workspaces: Record<ShapeType, ShapeWorkspace>, selectedShape: ShapeType, rotation: { yaw:number; pitch:number }, focalLength: number, width: number, height: number): UnitProjectionBounds | null {
+  if (width <= 0 || height <= 0) return null;
+  const selectedIndex = workspaces[selectedShape].selectedIndex;
+  const scene = allSceneFaces(workspaces);
+  const selectedFaces = scene.filter((face) => face.shape === selectedShape && face.instanceIndex === selectedIndex);
+  const points = (selectedFaces.length ? selectedFaces : scene).flatMap((face) => face.points).map((point) => rotate(point, rotation.yaw, rotation.pitch));
+  if (!points.length) return null;
+  const lensRatio = focalLength / 35;
+  const cameraDistance = 4.25 * lensRatio;
+  const focal = Math.min(width, height) * 1.75 * lensRatio;
+  const projected = points.map((point) => {
+    const denominator = Math.max(1.2, cameraDistance - point[2]);
+    return { x:(point[0] * focal) / denominator, y:-(point[1] * focal) / denominator };
+  });
+  return {
+    minX:Math.min(...projected.map((point) => point.x)),
+    maxX:Math.max(...projected.map((point) => point.x)),
+    minY:Math.min(...projected.map((point) => point.y)),
+    maxY:Math.max(...projected.map((point) => point.y)),
+  };
+}
+
+function calculateZoomLimit(bounds: UnitProjectionBounds | null, width: number, height: number) {
+  if (!bounds || width <= 0 || height <= 0) return 1.72;
+  const available = Math.max(40, Math.min(width,height) - CANVAS_EDGE_PADDING * 2);
+  const projectedSize = Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY, 1);
+  return Math.max(.03, Math.min(MAX_ZOOM_SEARCH, available / projectedSize));
+}
+
+function clampPanToSquare(pan: { x:number; y:number }, bounds: UnitProjectionBounds | null, zoom: number, width: number, height: number) {
+  if (!bounds || width <= 0 || height <= 0) return pan;
+  const half = Math.max(20, (Math.min(width,height) - CANVAS_EDGE_PADDING * 2) / 2);
+  const minPanX = -half - bounds.minX * zoom;
+  const maxPanX = half - bounds.maxX * zoom;
+  const minPanY = -half - bounds.minY * zoom;
+  const maxPanY = half - bounds.maxY * zoom;
+  return {
+    x:Math.max(minPanX,Math.min(maxPanX,pan.x)),
+    y:Math.max(minPanY,Math.min(maxPanY,pan.y)),
+  };
+}
+
 function sceneObstacles(workspaces: Record<ShapeType, ShapeWorkspace>, excludeShape?: ShapeType, excludeIndex = -1) {
   return SHAPES.flatMap(({ id }) => {
     const workspace = workspaces[id];
@@ -372,7 +417,7 @@ function fillProjectedDecal(ctx: CanvasRenderingContext2D, image: HTMLImageEleme
   }
 }
 
-function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, faceRegionsRef: React.MutableRefObject<FaceHitRegion[]>, openingRegionsRef: React.MutableRefObject<OpeningHitRegion[]>, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, selectedShape: ShapeType, workspaces: Record<ShapeType, ShapeWorkspace>, rotation: { yaw: number; pitch: number }, pan: { x: number; y: number }, zoom: number, groundEnabled: boolean, focalLength: number, materialPickerEnabled: boolean, openingPickerEnabled: boolean, canvasProjection: CanvasProjection = 'perspective') {
+function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, faceRegionsRef: React.MutableRefObject<FaceHitRegion[]>, openingRegionsRef: React.MutableRefObject<OpeningHitRegion[]>, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, selectedShape: ShapeType, workspaces: Record<ShapeType, ShapeWorkspace>, rotation: { yaw: number; pitch: number }, pan: { x: number; y: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, materialPickerEnabled: boolean, openingPickerEnabled: boolean, canvasProjection: CanvasProjection = 'perspective') {
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = canvas?.parentElement;
@@ -395,14 +440,14 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
       const scene = allSceneFaces(workspaces);
       const selectedWorkspace = workspaces[selectedShape];
       const lensRatio = focalLength / 35;
-      const cameraDistance = (4.25 * lensRatio) / zoom;
+      const cameraDistance = 4.25 * lensRatio;
       const focal = Math.min(w, h) * 1.75 * lensRatio;
       const orthographicScale = Math.min(w, h) * .42 * zoom;
       const centerX = w / 2 + pan.x, centerY = h / 2 - 5 + pan.y;
       const project = (v: Vec3) => {
         if (canvasProjection === 'orthographic') return { x:centerX + v[0] * orthographicScale, y:centerY - v[1] * orthographicScale, z:v[2] };
         const denominator = Math.max(1.2, cameraDistance - v[2]);
-        return { x: centerX + (v[0] * focal) / denominator, y: centerY - (v[1] * focal) / denominator, z: v[2] };
+        return { x: centerX + (v[0] * focal * zoom) / denominator, y: centerY - (v[1] * focal * zoom) / denominator, z: v[2] };
       };
       if (groundEnabled) {
         const ground = [[-4.5, GROUND_Y, -4.5], [4.5, GROUND_Y, -4.5], [4.5, GROUND_Y, 4.5], [-4.5, GROUND_Y, 4.5]] as Vec3[];
@@ -415,6 +460,20 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
         ctx.strokeStyle = "rgba(143,153,164,.34)";
         ctx.lineWidth = 1;
         ctx.stroke();
+      }
+      if (gridVisible && !cleanCapture) {
+        const gridSize = 2.25;
+        const gridY = GROUND_Y;
+        ctx.lineWidth = 1;
+        for (let i = -8; i <= 8; i++) {
+          const a = project(rotate([(i / 8) * gridSize, gridY, -gridSize], rotation.yaw, rotation.pitch));
+          const b = project(rotate([(i / 8) * gridSize, gridY, gridSize], rotation.yaw, rotation.pitch));
+          const c = project(rotate([-gridSize, gridY, (i / 8) * gridSize], rotation.yaw, rotation.pitch));
+          const d = project(rotate([gridSize, gridY, (i / 8) * gridSize], rotation.yaw, rotation.pitch));
+          ctx.strokeStyle = i === 0 ? "rgba(241,106,52,.28)" : "rgba(130,144,160,.13)";
+          ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(c.x, c.y); ctx.lineTo(d.x, d.y); ctx.stroke();
+        }
       }
       const light: Vec3 = [-0.35, 0.8, 0.55];
       const instanceProjected = new Map<string, { x: number; y: number }[]>();
@@ -526,7 +585,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
     const observer = new ResizeObserver(() => draw());
     observer.observe(container);
     return () => { observer.disconnect(); drawSceneRef.current = null; };
-  }, [canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, selectedShape, workspaces, rotation, pan, zoom, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled, canvasProjection]);
+  }, [canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, selectedShape, workspaces, rotation, pan, zoom, gridVisible, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled, canvasProjection]);
 }
 
 function DimensionControl({ label, axis, value, unit, minValue, maxValue, onChange }: { label: string; axis: string; value: number; unit: string; minValue?: number; maxValue?: number; onChange: (value: number) => void }) {
@@ -543,10 +602,11 @@ const ORTHOGRAPHIC_VIEWS: Record<OrthographicView, { label: string; eyebrow: str
   right: { label:'右视图', eyebrow:'RIGHT', axes:'Z / Y', rotation:{ yaw:Math.PI / 2, pitch:0 } },
 };
 
-function OrthographicViewport({ view, selectedShape, workspaces, groundEnabled, onSelect, onMove }: {
+function OrthographicViewport({ view, selectedShape, workspaces, gridVisible, groundEnabled, onSelect, onMove }: {
   view: OrthographicView;
   selectedShape: ShapeType;
   workspaces: Record<ShapeType, ShapeWorkspace>;
+  gridVisible: boolean;
   groundEnabled: boolean;
   onSelect: (shape: ShapeType, index: number) => void;
   onMove: (shape: ShapeType, index: number, delta: Vec3) => void;
@@ -561,7 +621,7 @@ function OrthographicViewport({ view, selectedShape, workspaces, groundEnabled, 
   const [zoom, setZoom] = useState(.82);
   const config = ORTHOGRAPHIC_VIEWS[view];
 
-  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, selectedShape, workspaces, config.rotation, pan, zoom, groundEnabled, 35, false, false, 'orthographic');
+  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, selectedShape, workspaces, config.rotation, pan, zoom, gridVisible, groundEnabled, 35, false, false, 'orthographic');
 
   const reset = () => { setPan({ x:0, y:0 }); setZoom(.82); };
   return <div className="ortho-card" data-view={view}>
@@ -601,7 +661,7 @@ function OrthographicViewport({ view, selectedShape, workspaces, groundEnabled, 
       onPointerCancel={(event)=>{ pointerRef.current=null; event.currentTarget.classList.remove('is-moving-object','is-panning'); }}
       onAuxClick={(event)=>event.preventDefault()}
       onDoubleClick={reset}
-      onWheel={(event)=>{ event.preventDefault(); setZoom((current)=>{ const next=Math.max(FREE_ZOOM_MIN,Math.min(FREE_ZOOM_MAX,current-event.deltaY*.002)); const rect=event.currentTarget.getBoundingClientRect(); const cursorX=event.clientX-rect.left-rect.width/2; const cursorY=event.clientY-rect.top-(rect.height/2-5); const ratio=next/current; setPan((position)=>({x:cursorX-(cursorX-position.x)*ratio,y:cursorY-(cursorY-position.y)*ratio})); return next; }); }} />
+      onWheel={(event)=>{ event.preventDefault(); setZoom((current)=>Math.max(.45,Math.min(3.4,current-event.deltaY*.0014))); }} />
     <div className="ortho-title"><span>{config.eyebrow}</span><strong>{config.label}</strong></div>
     <div className="ortho-axes">{config.axes}</div>
     <div className="ortho-help">拖动定位</div>
@@ -626,6 +686,8 @@ export default function ShapeStudio() {
   const [rotation, setRotation] = useState({ yaw: -.62, pitch: -.38 });
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
+  const [zoomLimit, setZoomLimit] = useState(1.72);
+  const [gridVisible, setGridVisible] = useState(true);
   const [groundEnabled, setGroundEnabled] = useState(false);
   const [focalLength, setFocalLength] = useState(35);
   const [captureStatus, setCaptureStatus] = useState(false);
@@ -653,7 +715,25 @@ export default function ShapeStudio() {
   const currentOpenings = openings[selectedIndex] ?? [];
   const selectedOpening = currentOpenings.find((opening) => opening.id === selectedOpeningId) ?? null;
   const groundMinY = groundOffsetFor(shape, dimensions, selectedLidAngle);
-  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, shape, workspaces, rotation, pan, zoom, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled);
+  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, shape, workspaces, rotation, pan, zoom, gridVisible, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const updateLimit = () => {
+      const bounds = selectedProjectionBounds(workspaces,shape,rotation,focalLength,canvas.clientWidth,canvas.clientHeight);
+      const nextLimit = calculateZoomLimit(bounds,canvas.clientWidth,canvas.clientHeight);
+      setZoomLimit(nextLimit);
+      setZoom((current) => {
+        const next = Math.min(current,nextLimit);
+        setPan((position) => clampPanToSquare(position,bounds,next,canvas.clientWidth,canvas.clientHeight));
+        return next;
+      });
+    };
+    updateLimit();
+    const observer = new ResizeObserver(updateLimit);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [workspaces,shape,rotation,focalLength]);
   const updateWorkspace = useCallback((targetShape: ShapeType, updater: (workspace: ShapeWorkspace) => ShapeWorkspace) => {
     setWorkspaces((current) => ({ ...current, [targetShape]: updater(current[targetShape]) }));
   }, []);
@@ -1031,18 +1111,18 @@ export default function ShapeStudio() {
         {SHAPES.map((item) => { const Icon = item.icon; const count=workspaces[item.id].positions.length; return <Button key={item.id} variant="ghost" className={`shape-button ${shape === item.id && count ? "is-active" : ""}`} onClick={() => addShapeInstance(item.id)} aria-label={`添加${item.label}`}><span className="shape-icon"><Icon size={25} strokeWidth={1.55} /></span><span>{item.label}<small>点击添加</small></span><i>{count || <Plus size={12}/>}</i></Button>; })}
       </div><div className="interaction-tip"><MousePointer2 size={18} /><p><strong>左键空白旋转视角</strong><span>中键平移画面 · 滚轮缩放</span></p></div></aside>
       <section className="viewport-panel" aria-label="3D 预览区">
-        <div className="viewport-meta"><div><span className="eyebrow">{threeViewEnabled?'FOUR VIEW WORKSPACE':`PERSPECTIVE / ${focalLength}mm`}</span><strong>{totalQuantity ? `混合场景 × ${totalQuantity}` : '空白工作画布'}</strong></div><div className="view-actions"><Button className="capture-button" size="sm" onClick={saveJpg}><Download size={15}/>{captureStatus ? "已保存" : "拍照 JPG"}</Button><Button className="three-view-button" variant={threeViewEnabled?'default':'ghost'} size="sm" onClick={()=>setThreeViewEnabled((enabled)=>!enabled)} aria-pressed={threeViewEnabled}><Grid3X3 size={15}/>{threeViewEnabled?'退出三视图':'展开三视图'}</Button><Button variant="ghost" size="sm" onClick={toggleGround} aria-pressed={groundEnabled}>{groundEnabled ? <Minus size={15}/> : <Plus size={15}/>} {groundEnabled ? "移除地面" : "添加地面"}</Button><Button variant="ghost" size="sm" onClick={resetView}><Redo2 size={15} />复位</Button></div></div>
+        <div className="viewport-meta"><div><span className="eyebrow">{threeViewEnabled?'FOUR VIEW WORKSPACE':`PERSPECTIVE / ${focalLength}mm`}</span><strong>{totalQuantity ? `混合场景 × ${totalQuantity}` : '空白工作画布'}</strong></div><div className="view-actions"><Button className="capture-button" size="sm" onClick={saveJpg}><Download size={15}/>{captureStatus ? "已保存" : "拍照 JPG"}</Button><Button className="three-view-button" variant={threeViewEnabled?'default':'ghost'} size="sm" onClick={()=>setThreeViewEnabled((enabled)=>!enabled)} aria-pressed={threeViewEnabled}><Grid3X3 size={15}/>{threeViewEnabled?'退出三视图':'展开三视图'}</Button><Button variant="ghost" size="sm" onClick={toggleGround} aria-pressed={groundEnabled}>{groundEnabled ? <Minus size={15}/> : <Plus size={15}/>} {groundEnabled ? "移除地面" : "添加地面"}</Button><Button variant="ghost" size="sm" onClick={() => setGridVisible((visible) => !visible)} aria-pressed={gridVisible}><Grid3X3 size={16} />网格</Button><Button variant="ghost" size="sm" onClick={resetView}><Redo2 size={15} />复位</Button></div></div>
         <div className={`viewport-workarea ${threeViewEnabled?'is-quad':'is-single'}`}>
         <div className={`canvas-stage ${captureStatus ? "is-captured" : ""}`}><canvas ref={canvasRef} tabIndex={0} aria-label="1比1透视画布，左键空白旋转，中键平移视角，滚轮缩放"
           onPointerDown={(e) => { e.preventDefault(); if(e.button===1){e.currentTarget.setPointerCapture(e.pointerId);pointerRef.current={id:e.pointerId,x:e.clientX,y:e.clientY,action:"pan",objectShape:shape,objectIndex:-1};e.currentTarget.classList.add("is-panning");return;} const rect=e.currentTarget.getBoundingClientRect(); const x=e.clientX-rect.left,y=e.clientY-rect.top; if(openingPickerEnabled){ const openingHit=[...openingRegionsRef.current].reverse().find((region)=>region.shape==='garment'&&pointInPolygon(x,y,region.polygon)); if(openingHit){setShape('garment');selectOpening(openingHit.openingId,openingHit.instanceIndex);return;} const targetFace=[...faceRegionsRef.current].reverse().find((region)=>region.shape==='garment'&&(region.surfaceId==='front'||region.surfaceId==='back'||region.surfaceId==='side')&&pointInPolygon(x,y,region.polygon)&&!region.holes?.some((hole)=>pointInPolygon(x,y,hole))); if(targetFace){setShape('garment');updateWorkspace('garment',(workspace)=>({...workspace,selectedIndex:targetFace.instanceIndex,openingSurfaceId:targetFace.surfaceId as 'front'|'back'|'side',selectedOpeningId:null,selectedSurfaceIds:[]}));return;} } const faceHit=materialPickerEnabled?[...faceRegionsRef.current].reverse().find((region)=>pointInPolygon(x,y,region.polygon)&&!region.holes?.some((hole)=>pointInPolygon(x,y,hole))):undefined; if(faceHit){ const append=e.shiftKey; setShape(faceHit.shape); updateWorkspace(faceHit.shape,(workspace)=>({...workspace,selectedIndex:faceHit.instanceIndex,selectedSurfaceIds:updateSurfaceSelection(workspace.selectedIndex===faceHit.instanceIndex?workspace.selectedSurfaceIds:[],faceHit.surfaceId,append)})); return; } const hit=[...hitRegionsRef.current].sort((a,b)=>a.radius-b.radius).find((region)=>Math.hypot(x-region.x,y-region.y)<=region.radius+10); e.currentTarget.setPointerCapture(e.pointerId); if(hit)selectInstance(hit.shape,hit.index); pointerRef.current = { id:e.pointerId, x:e.clientX, y:e.clientY, action:hit?"object":"camera", objectShape:hit?.shape ?? shape, objectIndex:hit?.index ?? -1 }; e.currentTarget.classList.add(hit?"is-moving-object":"is-dragging"); }}
           onPointerMove={(e) => { const p=pointerRef.current; if(!p||p.id!==e.pointerId)return; const dx=e.clientX-p.x,dy=e.clientY-p.y; if(p.action==="camera")setRotation((r)=>({yaw:r.yaw+dx*.009,pitch:Math.max(-1.48,Math.min(1.48,r.pitch+dy*.009))})); else if(p.action==="pan")setPan((current)=>({x:current.x+dx,y:current.y+dy})); else { const canvas=e.currentTarget; const factor=2.45/(Math.max(220,Math.min(canvas.clientWidth,canvas.clientHeight))*zoom); const [wx,wy,wz]=inverseRotate([dx*factor,-dy*factor,0],rotation.yaw,rotation.pitch); setWorkspaces((currentWorkspaces)=>{ const workspace=currentWorkspaces[p.objectShape]; const current=workspace.positions[p.objectIndex]; if(!current)return currentWorkspaces; const desired=[current[0]+wx,current[1]+wy,current[2]+wz] as Vec3; const resolved=collisionSafePositionInScene(p.objectShape,currentWorkspaces,p.objectIndex,desired,groundEnabled); return { ...currentWorkspaces, [p.objectShape]:{ ...workspace, positions:workspace.positions.map((position,index)=>index===p.objectIndex?resolved:position) } }; }); } pointerRef.current={...p,x:e.clientX,y:e.clientY}; }}
           onPointerUp={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object","is-panning"); }} onPointerCancel={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object","is-panning"); }} onAuxClick={(e)=>e.preventDefault()} onDoubleClick={resetView}
-          onWheel={(e) => { e.preventDefault(); setZoom((current)=>{ const next=Math.max(FREE_ZOOM_MIN,Math.min(FREE_ZOOM_MAX,current-e.deltaY*.0025)); const rect=e.currentTarget.getBoundingClientRect(); const cursorX=e.clientX-rect.left-rect.width/2; const cursorY=e.clientY-rect.top-(rect.height/2-5); const ratio=next/current; setPan((position)=>({x:cursorX-(cursorX-position.x)*ratio,y:cursorY-(cursorY-position.y)*ratio})); return next; }); }}
+          onWheel={(e) => { e.preventDefault(); const canvas=e.currentTarget; const bounds=selectedProjectionBounds(workspaces,shape,rotation,focalLength,canvas.clientWidth,canvas.clientHeight); setZoom((current)=>{ const minimum=Math.min(MIN_ZOOM,zoomLimit*.5); const next=Math.max(minimum,Math.min(zoomLimit,current-e.deltaY*.0015)); const anchorX=bounds?(bounds.minX+bounds.maxX)/2:0; const anchorY=bounds?(bounds.minY+bounds.maxY)/2:0; setPan((position)=>clampPanToSquare({x:position.x+anchorX*(current-next),y:position.y+anchorY*(current-next)},bounds,next,canvas.clientWidth,canvas.clientHeight)); return next; }); }}
           onKeyDown={(e) => { if(e.key==="ArrowLeft")setRotation((r)=>({...r,yaw:r.yaw-.08})); if(e.key==="ArrowRight")setRotation((r)=>({...r,yaw:r.yaw+.08})); if(e.key==="ArrowUp")setRotation((r)=>({...r,pitch:Math.max(-1.48,r.pitch-.08)})); if(e.key==="ArrowDown")setRotation((r)=>({...r,pitch:Math.min(1.48,r.pitch+.08)})); if(e.key==="0")resetView(); }} />
-          {threeViewEnabled?<div className="ortho-title perspective-title"><span>PERSPECTIVE</span><strong>透视视图</strong></div>:<div className="canvas-ratio-label">自由画布 · 指针缩放</div>}{!totalQuantity && <div className="empty-canvas-state"><span><Plus size={22}/></span><strong>空白工作画布</strong><small>点击左侧任意图形，将模型添加到这里</small></div>}{hasSelectedModel && <><div className="dimension-badge badge-width"><span>W</span>{dimensionLabel(dimensions.width)}</div><div className="dimension-badge badge-height"><span>H</span>{dimensionLabel(dimensions.height)}</div><div className="dimension-badge badge-depth"><span>D</span>{dimensionLabel(dimensions.depth)}</div></>}<div className="camera-readout"><Camera size={14}/><span>{focalLength}mm · {fieldOfView}°</span></div><div className="zoom-readout"><Rotate3D size={15} /><span>{Math.round(zoom*100)}% · 自由缩放</span></div><div className="capture-confirmation"><Camera size={16}/>JPG 已保存</div>
+          {threeViewEnabled?<div className="ortho-title perspective-title"><span>PERSPECTIVE</span><strong>透视视图</strong></div>:<div className="canvas-ratio-label">1:1 极限画布</div>}{!totalQuantity && <div className="empty-canvas-state"><span><Plus size={22}/></span><strong>空白工作画布</strong><small>点击左侧任意图形，将模型添加到这里</small></div>}{hasSelectedModel && <><div className="dimension-badge badge-width"><span>W</span>{dimensionLabel(dimensions.width)}</div><div className="dimension-badge badge-height"><span>H</span>{dimensionLabel(dimensions.height)}</div><div className="dimension-badge badge-depth"><span>D</span>{dimensionLabel(dimensions.depth)}</div></>}<div className="camera-readout"><Camera size={14}/><span>{focalLength}mm · {fieldOfView}°</span></div><div className="zoom-readout"><Rotate3D size={15} /><span>{Math.round(zoom*100)}% / 极限 {Math.round(zoomLimit*100)}%</span></div><div className="capture-confirmation"><Camera size={16}/>JPG 已保存</div>
           {groundEnabled && <div className="ground-status"><span className="status-dot"/>固定地面 · 防穿透</div>}
         </div>
-        {threeViewEnabled&&(['front','top','right'] as OrthographicView[]).map((view)=><OrthographicViewport key={view} view={view} selectedShape={shape} workspaces={workspaces} groundEnabled={groundEnabled} onSelect={selectInstance} onMove={moveInstanceByDelta}/>) }
+        {threeViewEnabled&&(['front','top','right'] as OrthographicView[]).map((view)=><OrthographicViewport key={view} view={view} selectedShape={shape} workspaces={workspaces} gridVisible={gridVisible} groundEnabled={groundEnabled} onSelect={selectInstance} onMove={moveInstanceByDelta}/>) }
         </div>
         {!threeViewEnabled&&<div className="view-presets" aria-label="视角预设"><span>快速视角</span><Button variant="outline" size="sm" onClick={()=>setView("front")}>正面</Button><Button variant="outline" size="sm" onClick={()=>setView("top")}>顶面</Button><Button variant="outline" size="sm" onClick={()=>setView("iso")}>等轴</Button></div>}
       </section>

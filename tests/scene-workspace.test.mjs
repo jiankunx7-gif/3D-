@@ -57,11 +57,11 @@ test('every model keeps independent dimensions and uniform canvas scale', () => 
   assert.match(source, /当前模型等比缩放/);
 });
 
-test('canvas zoom is free, cursor-centred and independent of model placement', () => {
-  assert.match(source, /const FREE_ZOOM_MAX = 8/);
-  assert.match(source, /const cursorX=.*rect\.width\/2/);
-  assert.match(source, /x:cursorX-\(cursorX-position\.x\)\*ratio/);
-  assert.doesNotMatch(source, /calculateZoomLimit/);
-  assert.doesNotMatch(source, /setGridVisible/);
-  assert.doesNotMatch(source, />网格</);
+test('canvas zoom remains stable and keeps the selected model inside the 1:1 workspace', () => {
+  assert.match(source, /const cameraDistance = 4\.25 \* lensRatio/);
+  assert.match(source, /focal \* zoom/);
+  assert.match(source, /function calculateZoomLimit/);
+  assert.match(source, /function clampPanToSquare/);
+  assert.match(source, /setGridVisible/);
+  assert.match(source, />网格</);
 });
