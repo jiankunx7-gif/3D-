@@ -394,7 +394,7 @@ function fillProjectedDecal(ctx: CanvasRenderingContext2D, image: HTMLImageEleme
   }
 }
 
-function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, faceRegionsRef: React.MutableRefObject<FaceHitRegion[]>, openingRegionsRef: React.MutableRefObject<OpeningHitRegion[]>, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, selectedShape: ShapeType, workspaces: Record<ShapeType, ShapeWorkspace>, rotation: { yaw: number; pitch: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, materialPickerEnabled: boolean, openingPickerEnabled: boolean) {
+function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>, hitRegionsRef: React.MutableRefObject<HitRegion[]>, faceRegionsRef: React.MutableRefObject<FaceHitRegion[]>, openingRegionsRef: React.MutableRefObject<OpeningHitRegion[]>, drawSceneRef: React.MutableRefObject<((cleanCapture?: boolean) => void) | null>, selectedShape: ShapeType, workspaces: Record<ShapeType, ShapeWorkspace>, rotation: { yaw: number; pitch: number }, pan: { x: number; y: number }, zoom: number, gridVisible: boolean, groundEnabled: boolean, focalLength: number, materialPickerEnabled: boolean, openingPickerEnabled: boolean) {
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = canvas?.parentElement;
@@ -419,7 +419,7 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
       const lensRatio = focalLength / 35;
       const cameraDistance = (4.25 * lensRatio) / zoom;
       const focal = Math.min(w, h) * 1.75 * lensRatio;
-      const centerX = w / 2, centerY = h / 2 - 5;
+      const centerX = w / 2 + pan.x, centerY = h / 2 - 5 + pan.y;
       const project = (v: Vec3) => {
         const denominator = Math.max(1.2, cameraDistance - v[2]);
         return { x: centerX + (v[0] * focal) / denominator, y: centerY - (v[1] * focal) / denominator, z: v[2] };
@@ -522,6 +522,17 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
         if (holePolygons.length) {
           holePolygons.forEach((hole) => { ctx.beginPath(); tracePolygon(ctx,hole); ctx.strokeStyle='rgba(36,25,21,.68)'; ctx.lineWidth=1.25; ctx.stroke(); });
         }
+        if (!cleanCapture && shape === selectedShape && instanceIndex === selectedWorkspace.selectedIndex) {
+          ctx.save();
+          traceFaceWithHoles(ctx,projected,holePolygons);
+          ctx.fillStyle = 'rgba(255,184,112,.28)';
+          ctx.fill('evenodd');
+          ctx.beginPath(); tracePolygon(ctx,projected);
+          ctx.strokeStyle = 'rgba(225,83,27,.78)';
+          ctx.lineWidth = 1.15;
+          ctx.stroke();
+          ctx.restore();
+        }
         if (!cleanCapture && materialPickerEnabled && shape === selectedShape && instanceIndex === selectedWorkspace.selectedIndex && selectedWorkspace.selectedSurfaceIds.includes(surfaceId)) {
           ctx.save(); ctx.beginPath(); tracePolygon(ctx,projected); ctx.clip(); traceFaceWithHoles(ctx,projected,holePolygons); ctx.clip('evenodd'); ctx.fillStyle = "rgba(238,106,53,.18)"; ctx.fillRect(0,0,w,h); ctx.restore();
           ctx.beginPath(); tracePolygon(ctx,projected);
@@ -543,32 +554,13 @@ function useCanvasRenderer(canvasRef: React.RefObject<HTMLCanvasElement | null>,
         return { shape:regionShape, index, x: (left + right) / 2, y: (top + bottom) / 2, radius: Math.max(26, Math.hypot(right-left, bottom-top) / 2) };
       });
       hitRegionsRef.current = regions;
-      const selected = regions.find((region) => region.shape === selectedShape && region.index === selectedWorkspace.selectedIndex);
-      if (selected && !cleanCapture) {
-        ctx.save();
-        ctx.strokeStyle = "rgba(238,106,53,.9)";
-        ctx.fillStyle = "rgba(255,255,255,.94)";
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([5, 4]);
-        ctx.beginPath(); ctx.arc(selected.x, selected.y, selected.radius + 8, 0, Math.PI * 2); ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.font = "700 10px Arial";
-        const label = `${SHAPES.find((item) => item.id === selectedShape)?.label ?? '形体'} ${selectedWorkspace.selectedIndex + 1}`;
-        const labelWidth = ctx.measureText(label).width + 16;
-        ctx.fillRect(selected.x - labelWidth/2, selected.y - selected.radius - 27, labelWidth, 20);
-        ctx.strokeRect(selected.x - labelWidth/2, selected.y - selected.radius - 27, labelWidth, 20);
-        ctx.fillStyle = "#d9511d";
-        ctx.textAlign = "center"; ctx.textBaseline = "middle";
-        ctx.fillText(label, selected.x, selected.y - selected.radius - 17);
-        ctx.restore();
-      }
     };
     drawSceneRef.current = draw;
     draw();
     const observer = new ResizeObserver(() => draw());
     observer.observe(container);
     return () => { observer.disconnect(); drawSceneRef.current = null; };
-  }, [canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, selectedShape, workspaces, rotation, zoom, gridVisible, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled]);
+  }, [canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, selectedShape, workspaces, rotation, pan, zoom, gridVisible, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled]);
 }
 
 function DimensionControl({ label, axis, value, unit, minValue, maxValue, onChange }: { label: string; axis: string; value: number; unit: string; minValue?: number; maxValue?: number; onChange: (value: number) => void }) {
@@ -585,7 +577,7 @@ export default function ShapeStudio() {
   const faceRegionsRef = useRef<FaceHitRegion[]>([]);
   const openingRegionsRef = useRef<OpeningHitRegion[]>([]);
   const drawSceneRef = useRef<((cleanCapture?: boolean) => void) | null>(null);
-  const pointerRef = useRef<{ id: number; x: number; y: number; action: "object" | "camera"; objectShape: ShapeType; objectIndex: number } | null>(null);
+  const pointerRef = useRef<{ id: number; x: number; y: number; action: "object" | "camera" | "pan"; objectShape: ShapeType; objectIndex: number } | null>(null);
   const lidAnimationRef = useRef<number | null>(null);
   const [shape, setShape] = useState<ShapeType>("garment");
   const isGarment = shape === "garment";
@@ -595,6 +587,7 @@ export default function ShapeStudio() {
     cylinder: { dimensions: { width: 3, height: 4, depth: 3, scale: 1 }, positions: [], lidAngles: [], crownRoundness: [], hookEnabled: [], hookSizes: [], colors: [], selectedIndex: 0, selectedSurfaceIds: [], faceMaterials: {}, decals: {}, openings:[], selectedOpeningId:null, openingSurfaceId:'front' },
   });
   const [rotation, setRotation] = useState({ yaw: -.62, pitch: -.38 });
+  const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [zoomLimit, setZoomLimit] = useState(1.72);
   const [gridVisible, setGridVisible] = useState(true);
@@ -622,7 +615,7 @@ export default function ShapeStudio() {
   const currentOpenings = openings[selectedIndex] ?? [];
   const selectedOpening = currentOpenings.find((opening) => opening.id === selectedOpeningId) ?? null;
   const groundMinY = groundOffsetFor(shape, dimensions, selectedLidAngle);
-  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, shape, workspaces, rotation, zoom, gridVisible, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled);
+  useCanvasRenderer(canvasRef, hitRegionsRef, faceRegionsRef, openingRegionsRef, drawSceneRef, shape, workspaces, rotation, pan, zoom, gridVisible, groundEnabled, focalLength, materialPickerEnabled, openingPickerEnabled);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -931,7 +924,7 @@ export default function ShapeStudio() {
     const duplicate = { ...source, id:`opening-${Date.now()}-${Math.random().toString(36).slice(2,8)}`, u:position[0], v:position[1] };
     return { ...workspace, openings:workspace.openings.map((list,index) => index === workspace.selectedIndex ? [...list,duplicate] : list), selectedOpeningId:duplicate.id };
   });
-  const resetView = () => { setRotation({ yaw: -.62, pitch: -.38 }); setZoom(1); };
+  const resetView = () => { setRotation({ yaw: -.62, pitch: -.38 }); setPan({ x:0, y:0 }); setZoom(1); };
   const setView = (view: "front" | "top" | "iso") => {
     if (view === "front") setRotation({ yaw: 0, pitch: 0 });
     if (view === "top") setRotation({ yaw: 0, pitch: -Math.PI / 2 + .02 });
@@ -983,13 +976,13 @@ export default function ShapeStudio() {
     <div className="workspace">
       <aside className="shape-panel" aria-label="图形选择"><div className="panel-title"><span>01</span><div><strong>添加图形</strong><small>点击加入同一画布</small></div></div><div className="shape-list">
         {SHAPES.map((item) => { const Icon = item.icon; const count=workspaces[item.id].positions.length; return <Button key={item.id} variant="ghost" className={`shape-button ${shape === item.id && count ? "is-active" : ""}`} onClick={() => addShapeInstance(item.id)} aria-label={`添加${item.label}`}><span className="shape-icon"><Icon size={25} strokeWidth={1.55} /></span><span>{item.label}<small>点击添加</small></span><i>{count || <Plus size={12}/>}</i></Button>; })}
-      </div><div className="interaction-tip"><MousePointer2 size={18} /><p><strong>点击左侧可继续添加</strong><span>点中模型拖动 · 空白处旋转</span></p></div></aside>
+      </div><div className="interaction-tip"><MousePointer2 size={18} /><p><strong>左键空白旋转视角</strong><span>中键平移画面 · 滚轮缩放</span></p></div></aside>
       <section className="viewport-panel" aria-label="3D 预览区">
         <div className="viewport-meta"><div><span className="eyebrow">PERSPECTIVE / {focalLength}mm</span><strong>{totalQuantity ? `混合场景 × ${totalQuantity}` : '空白工作画布'}</strong></div><div className="view-actions"><Button className="capture-button" size="sm" onClick={saveJpg}><Download size={15}/>{captureStatus ? "已保存" : "拍照 JPG"}</Button><Button variant="ghost" size="sm" onClick={toggleGround} aria-pressed={groundEnabled}>{groundEnabled ? <Minus size={15}/> : <Plus size={15}/>} {groundEnabled ? "移除地面" : "添加地面"}</Button><Button variant="ghost" size="sm" onClick={() => setGridVisible((v) => !v)} aria-pressed={gridVisible}><Grid3X3 size={16} />网格</Button><Button variant="ghost" size="sm" onClick={resetView}><Redo2 size={15} />复位</Button></div></div>
-        <div className={`canvas-stage ${captureStatus ? "is-captured" : ""}`}><canvas ref={canvasRef} tabIndex={0} aria-label="1比1画布，点中图形可自由拖动位置，拖动空白旋转视角"
-          onPointerDown={(e) => { const rect=e.currentTarget.getBoundingClientRect(); const x=e.clientX-rect.left,y=e.clientY-rect.top; if(openingPickerEnabled){ const openingHit=[...openingRegionsRef.current].reverse().find((region)=>region.shape==='garment'&&pointInPolygon(x,y,region.polygon)); if(openingHit){setShape('garment');selectOpening(openingHit.openingId,openingHit.instanceIndex);return;} const targetFace=[...faceRegionsRef.current].reverse().find((region)=>region.shape==='garment'&&(region.surfaceId==='front'||region.surfaceId==='back'||region.surfaceId==='side')&&pointInPolygon(x,y,region.polygon)&&!region.holes?.some((hole)=>pointInPolygon(x,y,hole))); if(targetFace){setShape('garment');updateWorkspace('garment',(workspace)=>({...workspace,selectedIndex:targetFace.instanceIndex,openingSurfaceId:targetFace.surfaceId as 'front'|'back'|'side',selectedOpeningId:null,selectedSurfaceIds:[]}));return;} } const faceHit=materialPickerEnabled?[...faceRegionsRef.current].reverse().find((region)=>pointInPolygon(x,y,region.polygon)&&!region.holes?.some((hole)=>pointInPolygon(x,y,hole))):undefined; if(faceHit){ const append=e.shiftKey; setShape(faceHit.shape); updateWorkspace(faceHit.shape,(workspace)=>({...workspace,selectedIndex:faceHit.instanceIndex,selectedSurfaceIds:updateSurfaceSelection(workspace.selectedIndex===faceHit.instanceIndex?workspace.selectedSurfaceIds:[],faceHit.surfaceId,append)})); return; } const hit=[...hitRegionsRef.current].sort((a,b)=>a.radius-b.radius).find((region)=>Math.hypot(x-region.x,y-region.y)<=region.radius+10); e.currentTarget.setPointerCapture(e.pointerId); if(hit)selectInstance(hit.shape,hit.index); pointerRef.current = { id:e.pointerId, x:e.clientX, y:e.clientY, action:hit?"object":"camera", objectShape:hit?.shape ?? shape, objectIndex:hit?.index ?? -1 }; e.currentTarget.classList.add(hit?"is-moving-object":"is-dragging"); }}
-          onPointerMove={(e) => { const p=pointerRef.current; if(!p||p.id!==e.pointerId)return; const dx=e.clientX-p.x,dy=e.clientY-p.y; if(p.action==="camera")setRotation((r)=>({yaw:r.yaw+dx*.009,pitch:Math.max(-1.48,Math.min(1.48,r.pitch+dy*.009))})); else { const canvas=e.currentTarget; const factor=2.45/(Math.max(220,Math.min(canvas.clientWidth,canvas.clientHeight))*zoom); const [wx,wy,wz]=inverseRotate([dx*factor,-dy*factor,0],rotation.yaw,rotation.pitch); setWorkspaces((currentWorkspaces)=>{ const workspace=currentWorkspaces[p.objectShape]; const current=workspace.positions[p.objectIndex]; if(!current)return currentWorkspaces; const desired=[current[0]+wx,current[1]+wy,current[2]+wz] as Vec3; const resolved=collisionSafePositionInScene(p.objectShape,currentWorkspaces,p.objectIndex,desired,groundEnabled); return { ...currentWorkspaces, [p.objectShape]:{ ...workspace, positions:workspace.positions.map((position,index)=>index===p.objectIndex?resolved:position) } }; }); } pointerRef.current={...p,x:e.clientX,y:e.clientY}; }}
-          onPointerUp={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object"); }} onPointerCancel={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object"); }} onDoubleClick={resetView}
+        <div className={`canvas-stage ${captureStatus ? "is-captured" : ""}`}><canvas ref={canvasRef} tabIndex={0} aria-label="1比1画布，左键空白旋转，中键平移视角，滚轮缩放"
+          onPointerDown={(e) => { e.preventDefault(); if(e.button===1){e.currentTarget.setPointerCapture(e.pointerId);pointerRef.current={id:e.pointerId,x:e.clientX,y:e.clientY,action:"pan",objectShape:shape,objectIndex:-1};e.currentTarget.classList.add("is-panning");return;} const rect=e.currentTarget.getBoundingClientRect(); const x=e.clientX-rect.left,y=e.clientY-rect.top; if(openingPickerEnabled){ const openingHit=[...openingRegionsRef.current].reverse().find((region)=>region.shape==='garment'&&pointInPolygon(x,y,region.polygon)); if(openingHit){setShape('garment');selectOpening(openingHit.openingId,openingHit.instanceIndex);return;} const targetFace=[...faceRegionsRef.current].reverse().find((region)=>region.shape==='garment'&&(region.surfaceId==='front'||region.surfaceId==='back'||region.surfaceId==='side')&&pointInPolygon(x,y,region.polygon)&&!region.holes?.some((hole)=>pointInPolygon(x,y,hole))); if(targetFace){setShape('garment');updateWorkspace('garment',(workspace)=>({...workspace,selectedIndex:targetFace.instanceIndex,openingSurfaceId:targetFace.surfaceId as 'front'|'back'|'side',selectedOpeningId:null,selectedSurfaceIds:[]}));return;} } const faceHit=materialPickerEnabled?[...faceRegionsRef.current].reverse().find((region)=>pointInPolygon(x,y,region.polygon)&&!region.holes?.some((hole)=>pointInPolygon(x,y,hole))):undefined; if(faceHit){ const append=e.shiftKey; setShape(faceHit.shape); updateWorkspace(faceHit.shape,(workspace)=>({...workspace,selectedIndex:faceHit.instanceIndex,selectedSurfaceIds:updateSurfaceSelection(workspace.selectedIndex===faceHit.instanceIndex?workspace.selectedSurfaceIds:[],faceHit.surfaceId,append)})); return; } const hit=[...hitRegionsRef.current].sort((a,b)=>a.radius-b.radius).find((region)=>Math.hypot(x-region.x,y-region.y)<=region.radius+10); e.currentTarget.setPointerCapture(e.pointerId); if(hit)selectInstance(hit.shape,hit.index); pointerRef.current = { id:e.pointerId, x:e.clientX, y:e.clientY, action:hit?"object":"camera", objectShape:hit?.shape ?? shape, objectIndex:hit?.index ?? -1 }; e.currentTarget.classList.add(hit?"is-moving-object":"is-dragging"); }}
+          onPointerMove={(e) => { const p=pointerRef.current; if(!p||p.id!==e.pointerId)return; const dx=e.clientX-p.x,dy=e.clientY-p.y; if(p.action==="camera")setRotation((r)=>({yaw:r.yaw+dx*.009,pitch:Math.max(-1.48,Math.min(1.48,r.pitch+dy*.009))})); else if(p.action==="pan")setPan((current)=>({x:current.x+dx,y:current.y+dy})); else { const canvas=e.currentTarget; const factor=2.45/(Math.max(220,Math.min(canvas.clientWidth,canvas.clientHeight))*zoom); const [wx,wy,wz]=inverseRotate([dx*factor,-dy*factor,0],rotation.yaw,rotation.pitch); setWorkspaces((currentWorkspaces)=>{ const workspace=currentWorkspaces[p.objectShape]; const current=workspace.positions[p.objectIndex]; if(!current)return currentWorkspaces; const desired=[current[0]+wx,current[1]+wy,current[2]+wz] as Vec3; const resolved=collisionSafePositionInScene(p.objectShape,currentWorkspaces,p.objectIndex,desired,groundEnabled); return { ...currentWorkspaces, [p.objectShape]:{ ...workspace, positions:workspace.positions.map((position,index)=>index===p.objectIndex?resolved:position) } }; }); } pointerRef.current={...p,x:e.clientX,y:e.clientY}; }}
+          onPointerUp={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object","is-panning"); }} onPointerCancel={(e) => { pointerRef.current=null; e.currentTarget.classList.remove("is-dragging","is-moving-object","is-panning"); }} onAuxClick={(e)=>e.preventDefault()} onDoubleClick={resetView}
           onWheel={(e) => { e.preventDefault(); setZoom((z)=>Math.max(Math.min(MIN_ZOOM,zoomLimit * .5),Math.min(zoomLimit,z-e.deltaY*.0015))); }}
           onKeyDown={(e) => { if(e.key==="ArrowLeft")setRotation((r)=>({...r,yaw:r.yaw-.08})); if(e.key==="ArrowRight")setRotation((r)=>({...r,yaw:r.yaw+.08})); if(e.key==="ArrowUp")setRotation((r)=>({...r,pitch:Math.max(-1.48,r.pitch-.08)})); if(e.key==="ArrowDown")setRotation((r)=>({...r,pitch:Math.min(1.48,r.pitch+.08)})); if(e.key==="0")resetView(); }} />
           <div className="canvas-ratio-label">1:1 极限画布</div>{!totalQuantity && <div className="empty-canvas-state"><span><Plus size={22}/></span><strong>空白工作画布</strong><small>点击左侧任意图形，将模型添加到这里</small></div>}{hasSelectedModel && <><div className="dimension-badge badge-width"><span>W</span>{dimensionLabel(dimensions.width)}</div><div className="dimension-badge badge-height"><span>H</span>{dimensionLabel(dimensions.height)}</div><div className="dimension-badge badge-depth"><span>D</span>{dimensionLabel(dimensions.depth)}</div></>}<div className="camera-readout"><Camera size={14}/><span>{focalLength}mm · {fieldOfView}°</span></div><div className="zoom-readout"><Rotate3D size={15} /><span>{Math.round(zoom*100)}% / 极限 {Math.round(zoomLimit*100)}%</span></div><div className="capture-confirmation"><Camera size={16}/>JPG 已保存</div>
