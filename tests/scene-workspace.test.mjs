@@ -31,3 +31,17 @@ test('selected models use a solid colour tint without a circular marquee', () =>
   assert.match(source, /rgba\(255,184,112,\.28\)/);
   assert.doesNotMatch(source, /ctx\.arc\(selected\.x/);
 });
+
+test('perspective workspace includes three synchronized orthographic positioning views', () => {
+  assert.match(source, /front: \{ label:'正视图'.*axes:'X \/ Y'/);
+  assert.match(source, /top: \{ label:'顶视图'.*axes:'X \/ Z'/);
+  assert.match(source, /right: \{ label:'右视图'.*axes:'Z \/ Y'/);
+  assert.match(source, /canvasProjection === 'orthographic'/);
+  assert.match(source, /\(\['front','top','right'\] as OrthographicView\[\]\)/);
+});
+
+test('orthographic dragging changes only the two visible axes and keeps collision handling', () => {
+  assert.match(source, /view==='front'\?\[horizontal,vertical,0\]:view==='top'\?\[horizontal,0,vertical\]:\[0,vertical,horizontal\]/);
+  assert.match(source, /moveInstanceByDelta/);
+  assert.match(source, /collisionSafePositionInScene\(targetShape,currentWorkspaces,targetIndex,desired,groundEnabled\)/);
+});
