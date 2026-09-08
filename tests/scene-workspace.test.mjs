@@ -5,13 +5,20 @@ import { readFile } from 'node:fs/promises';
 const source = await readFile(new URL('../src/shape-studio.tsx', import.meta.url), 'utf8');
 
 test('the workspace starts empty for every model type', () => {
-  assert.equal((source.match(/positions: \[\], lidAngles: \[\], crownRoundness: \[\]/g) ?? []).length, 3);
+  assert.equal((source.match(/positions: \[\], lidAngles: \[\], crownRoundness: \[\]/g) ?? []).length, 4);
   assert.match(source, /空白工作画布/);
 });
 
 test('left palette clicks add models to the shared scene', () => {
   assert.match(source, /onClick=\{\(\) => addShapeInstance\(item\.id\)\}/);
   assert.match(source, /const scene = allSceneFaces\(workspaces\)/);
+});
+
+test('the geometry palette includes a procedural front-low back-high trapezoid hat box', () => {
+  assert.match(source, /id: "trapezoid" as const, label: "梯形盒"/);
+  assert.match(source, /frontTopY=bottomY\+height\*\.62/);
+  assert.match(source, /'lid-window'/);
+  assert.match(source, /trapezoid: \{ dimensions: \{ width: 5\.6, height: 3\.2, depth: 5, scale: 1 \}/);
 });
 
 test('the fixed circular shadow is absent from canvas and JPG rendering', () => {
