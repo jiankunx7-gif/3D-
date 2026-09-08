@@ -101,48 +101,38 @@ function sceneFaces(shape: ShapeType, dimensions: Dimensions, lidAngle: number, 
     });
   } else if (shape === "trapezoid") {
     const x0=-width/2, x1=width/2, z0=-depth/2, z1=depth/2;
-    const frontTopY=bottomY+height*.62;
+    const frontTopY=bottomY+height*.34;
     const backTopY=hingeY;
-    const slopeLength=Math.hypot(depth,backTopY-frontTopY);
-    const normalY=depth/slopeLength;
-    const normalZ=(backTopY-frontTopY)/slopeLength;
+    const shoulderZ=z0+depth*.44;
     const ix0=x0+thickness, ix1=x1-thickness, iz0=z0+thickness, iz1=z1-thickness;
+    const innerShoulderZ=shoulderZ+thickness;
     const innerBottomY=bottomY+thickness;
-    const slopeY=(z:number)=>backTopY+(frontTopY-backTopY)*((z-z0)/depth);
     faces.push(
       { material:'body', surfaceId:'outer-back', points:[[x0,bottomY,z0],[x0,backTopY,z0],[x1,backTopY,z0],[x1,bottomY,z0]] },
       { material:'body', surfaceId:'outer-front', points:[[x0,bottomY,z1],[x1,bottomY,z1],[x1,frontTopY,z1],[x0,frontTopY,z1]] },
-      { material:'body', surfaceId:'outer-left', points:[[x0,bottomY,z0],[x0,bottomY,z1],[x0,frontTopY,z1],[x0,backTopY,z0]] },
-      { material:'body', surfaceId:'outer-right', points:[[x1,bottomY,z0],[x1,backTopY,z0],[x1,frontTopY,z1],[x1,bottomY,z1]] },
+      { material:'body', surfaceId:'outer-left', points:[[x0,bottomY,z0],[x0,bottomY,z1],[x0,frontTopY,z1],[x0,backTopY,shoulderZ],[x0,backTopY,z0]] },
+      { material:'body', surfaceId:'outer-right', points:[[x1,bottomY,z0],[x1,backTopY,z0],[x1,backTopY,shoulderZ],[x1,frontTopY,z1],[x1,bottomY,z1]] },
       { material:'body', surfaceId:'outer-bottom', points:[[x0,bottomY,z0],[x1,bottomY,z0],[x1,bottomY,z1],[x0,bottomY,z1]] },
-      { material:'trim', surfaceId:'rim', points:[[x0,backTopY,z0],[x1,backTopY,z0],[ix1,slopeY(iz0)-thickness,iz0],[ix0,slopeY(iz0)-thickness,iz0]] },
-      { material:'trim', surfaceId:'rim', points:[[x0,frontTopY,z1],[ix0,slopeY(iz1)-thickness,iz1],[ix1,slopeY(iz1)-thickness,iz1],[x1,frontTopY,z1]] },
-      { material:'trim', surfaceId:'rim', points:[[x0,backTopY,z0],[ix0,slopeY(iz0)-thickness,iz0],[ix0,slopeY(iz1)-thickness,iz1],[x0,frontTopY,z1]] },
-      { material:'trim', surfaceId:'rim', points:[[x1,backTopY,z0],[x1,frontTopY,z1],[ix1,slopeY(iz1)-thickness,iz1],[ix1,slopeY(iz0)-thickness,iz0]] },
-      { material:'inside', surfaceId:'inside-back', points:[[ix0,innerBottomY,iz0],[ix1,innerBottomY,iz0],[ix1,slopeY(iz0)-thickness,iz0],[ix0,slopeY(iz0)-thickness,iz0]] },
-      { material:'inside', surfaceId:'inside-front', points:[[ix0,innerBottomY,iz1],[ix0,slopeY(iz1)-thickness,iz1],[ix1,slopeY(iz1)-thickness,iz1],[ix1,innerBottomY,iz1]] },
-      { material:'inside', surfaceId:'inside-left', points:[[ix0,innerBottomY,iz0],[ix0,slopeY(iz0)-thickness,iz0],[ix0,slopeY(iz1)-thickness,iz1],[ix0,innerBottomY,iz1]] },
-      { material:'inside', surfaceId:'inside-right', points:[[ix1,innerBottomY,iz0],[ix1,innerBottomY,iz1],[ix1,slopeY(iz1)-thickness,iz1],[ix1,slopeY(iz0)-thickness,iz0]] },
+      { material:lidAngle>2?'inside':'body', surfaceId:'fixed-slope', points:[[x0,frontTopY,z1],[x1,frontTopY,z1],[x1,backTopY,shoulderZ],[x0,backTopY,shoulderZ]] },
+      { material:'trim', surfaceId:'rim', points:[[x0,backTopY,z0],[x1,backTopY,z0],[ix1,backTopY,iz0],[ix0,backTopY,iz0]] },
+      { material:'trim', surfaceId:'rim', points:[[x0,backTopY,shoulderZ],[ix0,backTopY,innerShoulderZ],[ix1,backTopY,innerShoulderZ],[x1,backTopY,shoulderZ]] },
+      { material:'trim', surfaceId:'rim', points:[[x0,backTopY,z0],[ix0,backTopY,iz0],[ix0,backTopY,innerShoulderZ],[x0,backTopY,shoulderZ]] },
+      { material:'trim', surfaceId:'rim', points:[[x1,backTopY,z0],[x1,backTopY,shoulderZ],[ix1,backTopY,innerShoulderZ],[ix1,backTopY,iz0]] },
+      { material:'inside', surfaceId:'inside-back', points:[[ix0,innerBottomY,iz0],[ix1,innerBottomY,iz0],[ix1,backTopY-thickness,iz0],[ix0,backTopY-thickness,iz0]] },
+      { material:'inside', surfaceId:'inside-front', points:[[ix0,innerBottomY,iz1],[ix0,frontTopY-thickness,iz1],[ix1,frontTopY-thickness,iz1],[ix1,innerBottomY,iz1]] },
+      { material:'inside', surfaceId:'inside-left', points:[[ix0,innerBottomY,iz0],[ix0,backTopY-thickness,iz0],[ix0,backTopY-thickness,innerShoulderZ],[ix0,frontTopY-thickness,iz1],[ix0,innerBottomY,iz1]] },
+      { material:'inside', surfaceId:'inside-right', points:[[ix1,innerBottomY,iz0],[ix1,innerBottomY,iz1],[ix1,frontTopY-thickness,iz1],[ix1,backTopY-thickness,innerShoulderZ],[ix1,backTopY-thickness,iz0]] },
       { material:'inside', surfaceId:'inside-bottom', points:[[ix0,innerBottomY,iz0],[ix0,innerBottomY,iz1],[ix1,innerBottomY,iz1],[ix1,innerBottomY,iz0]] },
     );
-    const lidPoint=(u:number,v:number,offset:number):Vec3=>[
-      x0+width*u,
-      backTopY+(frontTopY-backTopY)*v+normalY*offset,
-      z0+depth*v+normalZ*offset,
-    ];
-    const transform=(point:Vec3)=>hingeRotate(point,backTopY,z0,angle);
-    const quad=(surfaceId:string,material:SceneFace['material'],points:Vec3[])=>faces.push({ surfaceId,material,points:points.map(transform) });
-    quad('lid-inner','lid',[lidPoint(0,0,0),lidPoint(0,1,0),lidPoint(1,1,0),lidPoint(1,0,0)]);
-    const u0=.16,u1=.84,v0=.34,v1=.75;
-    quad('lid-back-band','lid',[lidPoint(0,0,thickness),lidPoint(0,v0,thickness),lidPoint(1,v0,thickness),lidPoint(1,0,thickness)]);
-    quad('lid-front-band','lid',[lidPoint(0,v1,thickness),lidPoint(0,1,thickness),lidPoint(1,1,thickness),lidPoint(1,v1,thickness)]);
-    quad('lid-left-band','lid',[lidPoint(0,v0,thickness),lidPoint(0,v1,thickness),lidPoint(u0,v1,thickness),lidPoint(u0,v0,thickness)]);
-    quad('lid-right-band','lid',[lidPoint(u1,v0,thickness),lidPoint(u1,v1,thickness),lidPoint(1,v1,thickness),lidPoint(1,v0,thickness)]);
-    quad('lid-window','inside',[lidPoint(u0,v0,thickness+.004),lidPoint(u0,v1,thickness+.004),lidPoint(u1,v1,thickness+.004),lidPoint(u1,v0,thickness+.004)]);
-    quad('lid-back-edge','lid',[lidPoint(0,0,0),lidPoint(1,0,0),lidPoint(1,0,thickness),lidPoint(0,0,thickness)]);
-    quad('lid-front-edge','lid',[lidPoint(0,1,0),lidPoint(0,1,thickness),lidPoint(1,1,thickness),lidPoint(1,1,0)]);
-    quad('lid-left-edge','lid',[lidPoint(0,0,0),lidPoint(0,0,thickness),lidPoint(0,1,thickness),lidPoint(0,1,0)]);
-    quad('lid-right-edge','lid',[lidPoint(1,0,0),lidPoint(1,1,0),lidPoint(1,1,thickness),lidPoint(1,0,thickness)]);
+    const lidVertices:Vec3[]=[
+      [x0,backTopY,z0],[x1,backTopY,z0],[x1,backTopY,shoulderZ],[x0,backTopY,shoulderZ],
+      [x0,backTopY+thickness,z0],[x1,backTopY+thickness,z0],[x1,backTopY+thickness,shoulderZ],[x0,backTopY+thickness,shoulderZ],
+    ].map((point)=>hingeRotate(point,backTopY,z0,angle));
+    [
+      { indices:[0,3,2,1],surfaceId:'lid-inner' },{ indices:[4,5,6,7],surfaceId:'lid-outer' },
+      { indices:[0,1,5,4],surfaceId:'lid-back-edge' },{ indices:[3,7,6,2],surfaceId:'lid-front-edge' },
+      { indices:[0,4,7,3],surfaceId:'lid-left-edge' },{ indices:[1,2,6,5],surfaceId:'lid-right-edge' },
+    ].forEach(({indices,surfaceId})=>faces.push({ material:'lid',surfaceId,points:indices.map((index)=>lidVertices[index]) }));
   } else {
     const segments = 28;
     const outerBottom = Array.from({ length: segments }, (_, i) => {
@@ -392,7 +382,7 @@ function surfaceLabel(shape: ShapeType, surfaceId: string | null) {
     'inside-back':'内壁后面', 'inside-front':'内壁正面', 'inside-left':'内壁左面', 'inside-right':'内壁右面', 'inside-side':'内部侧壁', 'inside-bottom':'内部底面',
     rim:'开口包边', 'outer-side':'圆柱侧面', 'lid-inner':'盖面内侧', 'lid-outer':'盖面外侧', 'lid-edge':'盖面侧边',
     'lid-back-edge':'盖面后边', 'lid-front-edge':'盖面前边', 'lid-left-edge':'盖面左边', 'lid-right-edge':'盖面右边',
-    'lid-back-band':'斜盖后部', 'lid-front-band':'斜盖前部', 'lid-left-band':'斜盖左侧', 'lid-right-band':'斜盖右侧', 'lid-window':'顶部观察窗',
+    'fixed-slope':'固定前斜面',
     back:'背面', front:'正面', 'front-trim':'前侧包边', side:'侧围', 'back-trim':'后侧包边', hook:'挂钩表面',
   };
   return common[surfaceId] ?? (shape === 'cylinder' ? '圆柱表面' : '模型表面');
@@ -1387,7 +1377,7 @@ export default function ShapeStudio() {
         </section>
         {!isGarment && <section className="editor-section lid-section" aria-label="顶部盖面编辑">
           <div className="section-heading"><span><DoorOpen size={17}/>形体 {selectedIndex+1} 顶部盖面</span><output>{Math.round(selectedLidAngle)}°</output></div>
-          <p>只控制当前选中的形体；{shape === "box" ? "沿长方体后边缘铰链翻动" : shape === "trapezoid" ? "沿梯形盒斜盖后边缘铰链翻动" : "沿圆柱体后侧铰链翻动"}。</p>
+          <p>只控制当前选中的形体；{shape === "box" ? "沿长方体后边缘铰链翻动" : shape === "trapezoid" ? "后部平盖沿最后方铰链翻动，前斜面保持固定" : "沿圆柱体后侧铰链翻动"}。</p>
           <Slider aria-label={`形体 ${selectedIndex+1} 盖面开启角度`} min={0} max={200} step={1} value={[selectedLidAngle]} onValueChange={([next])=>changeSelectedLid(next)} />
           <div className="lid-angle-range"><span>0° 关闭</span><span>200° 翻至背后</span></div>
           <div className="lid-presets"><Button variant="outline" size="sm" onClick={()=>animateLid(0)}>关闭</Button><Button variant="outline" size="sm" onClick={()=>animateLid(60)}>半开</Button><Button variant="outline" size="sm" onClick={()=>animateLid(110)}>打开</Button><Button size="sm" onClick={()=>animateLid(180)}>翻至背面</Button></div>

@@ -14,10 +14,12 @@ test('left palette clicks add models to the shared scene', () => {
   assert.match(source, /const scene = allSceneFaces\(workspaces\)/);
 });
 
-test('the geometry palette includes a procedural front-low back-high trapezoid hat box', () => {
+test('the geometry palette includes a pentagonal hat box with a fixed slope and rear hinged lid', () => {
   assert.match(source, /id: "trapezoid" as const, label: "梯形盒"/);
-  assert.match(source, /frontTopY=bottomY\+height\*\.62/);
-  assert.match(source, /'lid-window'/);
+  assert.match(source, /frontTopY=bottomY\+height\*\.34/);
+  assert.match(source, /shoulderZ=z0\+depth\*\.44/);
+  assert.match(source, /surfaceId:'fixed-slope'/);
+  assert.doesNotMatch(source, /surfaceId:'lid-window'/);
   assert.match(source, /trapezoid: \{ dimensions: \{ width: 5\.6, height: 3\.2, depth: 5, scale: 1 \}/);
 });
 
